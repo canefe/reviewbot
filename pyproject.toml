@@ -22,3 +22,5 @@ package = true
 reviewbot = "reviewbot.main:app"
 [tool.pyright]
 typeCheckingMode = "strict"
+[project.optional-dependencies]
+examples = ["fastapi"]
