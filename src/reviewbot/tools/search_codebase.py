@@ -8,7 +8,8 @@ from typing import Optional
 from langchain.tools import tool
 from rich.console import Console
 
-from reviewbot.infra.embeddings.in_memory_store import get_store
+from reviewbot.infra.embeddings.store_manager import CodebaseStoreManager
+from reviewbot.context import store_manager_ctx
 
 console = Console()
 
@@ -24,7 +25,7 @@ def search_codebase(query: str) -> str:
         grep-style matches: file:line:content
     """
     # path is relative to the repo root
-    store = get_store()
+    store = store_manager_ctx.get().get_store()
     repo_root = Path(store.repo_root).resolve()
 
     base = repo_root  # or a validated subpath if you support `path`
@@ -69,7 +70,7 @@ def search_codebase_semantic_search(query: str, path: Optional[str] = None) -> s
     Returns:
         string with the results of the search
     """
-    store = get_store()
+    store = store_manager_ctx.get().get_store()
     results = store.search(query, top_k=5, path=path)
     print("tool called")
     if not results:
@@ -95,7 +96,7 @@ def read_file(
     Returns:
         string with the contents of the file
     """
-    store = get_store()
+    store = store_manager_ctx.get().get_store()
     result = store.read_file(path, line_start=line_start, line_end=line_end)
     console.print(result)
     return result

@@ -1,6 +1,7 @@
 from langchain.tools import tool
 
-from reviewbot.infra.embeddings.in_memory_store import get_store
+from reviewbot.infra.embeddings.store_manager import CodebaseStoreManager
+from reviewbot.context import store_manager_ctx
 
 
 @tool
@@ -10,7 +11,7 @@ def compile_codebase() -> str:
     Returns:
         string with the results of the compilation
     """
-    store = get_store()
+    store = store_manager_ctx.get().get_store()
 
     results = store.compile("go build .")
     if not results:

@@ -10,3 +10,6 @@ wheels/
 .venv
 *.faiss
 *.pkl
+.DS_Store
+.env
+vectors/

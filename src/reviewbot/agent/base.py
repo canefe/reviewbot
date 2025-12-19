@@ -137,7 +137,6 @@ def tool_caller(agent: Any, messages: List[AnyMessage], settings: Settings) -> s
                             reason = str(content)
                     else:
                         reason = content
-                    print(f"AI response: {reason}")
                     final_response = content
                     messages.append(latest_message)
 
@@ -160,7 +159,6 @@ def tool_caller(agent: Any, messages: List[AnyMessage], settings: Settings) -> s
                         final_response = last
 
                 if isinstance(final_response, dict):
-                    print(f"Final response: {final_response}")
                     if final_response.get("content"):
                         final_response = final_response["content"][-1]["text"]
                     elif final_response.get("text"):
@@ -168,15 +166,14 @@ def tool_caller(agent: Any, messages: List[AnyMessage], settings: Settings) -> s
                     else:
                         final_response = final_response
 
-                if not (
-                    isinstance(final_response, str)
-                    and final_response.startswith("{")
-                    and final_response.endswith("}")
-                ):
-                    finished = True
+                if isinstance(final_response, str):
+                    try:
+                        final_response = json.loads(final_response)
+                        # valid JSON → keep looping
+                    except json.JSONDecodeError:
+                        finished = True
                 else:
                     final_response = json.loads(final_response.replace("\n", ""))
-                    print(f"Bugged AI response: {final_response}")
 
         except Exception:
             import traceback
@@ -184,7 +181,7 @@ def tool_caller(agent: Any, messages: List[AnyMessage], settings: Settings) -> s
             traceback.print_exc()
 
     if not isinstance(final_response, str):
-        console.print("Final response is not a string, returning None")
+        console.print(f"Final response is not a string : {final_response}, returning None")
         return "None"
     return final_response
 
@@ -197,10 +194,7 @@ def agent_runner(input: AgentRunnerInput):
 
     final_response = tool_caller(agent, messages, settings).result()
 
-    console.print("Analyzing response...")
-    print(messages)
     final_response = analyzer(agent, messages[-1].content, final_response).result()
-    console.print(f"Final response: {final_response}")
     return final_response
 
 
@@ -230,7 +224,6 @@ async def agent_runner_async(input: AgentRunnerInput):
                         reason = reason[-1]["text"]
                     else:
                         reason = latest_message.content
-                    print(reason)
                     final_response = latest_message.content
                     messages.append(latest_message)
                 elif isinstance(latest_message, ToolMessage):
@@ -248,10 +241,12 @@ async def agent_runner_async(input: AgentRunnerInput):
                     else:
                         final_response = final_response[-1]
                 # check if final response is a bugged AI message (last message["content"][-1]["text"] starts with { and ends with })
-                if not final_response.startswith("{") and not final_response.endswith(
-                    "}"
-                ):
-                    finished = True
+                if isinstance(final_response, str):
+                    try:
+                        json.loads(final_response)
+                        finished = False  # valid JSON string
+                    except json.JSONDecodeError:
+                        finished = True   # non-JSON string
                 else:
                     # Parse the final response as JSON (might contain \n s)
                     final_response = json.loads(final_response.replace("\n", ""))

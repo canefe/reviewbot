@@ -14,8 +14,9 @@ from pydantic import SecretStr
 from rich.console import Console
 
 from reviewbot.agent.base import AgentRunnerInput, Settings, agent_runner
-from reviewbot.infra.embeddings.in_memory_store import set_repo_name, set_repo_root
-from reviewbot.infra.git.clone import clone_repo_tmp, get_repo_name
+from reviewbot.context import store_manager_ctx
+from reviewbot.infra.embeddings.store_manager import CodebaseStoreManager
+from reviewbot.infra.git.clone import clone_repo_persistent, get_repo_name
 from reviewbot.models.gpt import get_gpt_model
 from reviewbot.tools.compile_codebase import compile_codebase
 from reviewbot.tools.search_codebase import (
@@ -30,6 +31,8 @@ class Config:
     llm_api_key: SecretStr
     llm_base_url: str
     llm_model_name: str
+    gitlab_api_v4: str
+    gitlab_token: str
 
 
 def load_env() -> Config:
@@ -37,12 +40,24 @@ def load_env() -> Config:
     llm_api_key = os.getenv("LLM_API_KEY")
     llm_base_url = os.getenv("LLM_BASE_URL")
     llm_model_name = os.getenv("LLM_MODEL")
-    if not llm_api_key or not llm_base_url or not llm_model_name:
-        raise ValueError("LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL must be set")
+    gitlab_api_v4 = os.getenv("GITLAB_API_V4_URL")
+    gitlab_token = os.getenv("GITLAB_BOT_TOKEN")
+    if (
+        not llm_api_key
+        or not llm_base_url
+        or not llm_model_name
+        or not gitlab_api_v4
+        or not gitlab_token
+    ):
+        raise ValueError(
+            "LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, GITLAB_API_V4_URL, and GITLAB_BOT_TOKEN must be set"
+        )
     return Config(
         llm_api_key=SecretStr(llm_api_key),
         llm_base_url=llm_base_url,
         llm_model_name=llm_model_name,
+        gitlab_api_v4=gitlab_api_v4,
+        gitlab_token=gitlab_token,
     )
 
 
@@ -51,17 +66,10 @@ console = Console()
 
 
 @app.command()
-def hello():
-    # just a random known public repo to test the clone (that is small)
-    with clone_repo_tmp("https://github.com/canefe/npcdrops") as tmp:
-        path = tmp
-        print(path)
-        input("sleep")
-
-
-@app.command()
-def test():
-    print(build_codebase_tree(Path("/Users/canefe/Projects/work/uapi")))
+def test(
+    repo_path: str = typer.Argument(..., help="Path to repository directory"),
+):
+    print(build_codebase_tree(Path(repo_path)))
 
 
 def fetch_mr_diff(
@@ -247,32 +255,49 @@ def work_agent(api_v4: str, project_id: str, mr_iid: str, token: str):
         tools=tools,
     )
     branch = get_mr_branch(api_v4, project_id, mr_iid, token)
-    with clone_repo_tmp(clone_url, branch=branch) as tmp:
-        path = tmp
-        user_prompt = build_user_prompt(Path(path), diff)
-        set_repo_root(path)
-        set_repo_name(get_repo_name(Path(path)))
+    repo_path = clone_repo_persistent(clone_url, branch=branch)
+    repo_path = Path(repo_path).resolve()
+    user_prompt = build_user_prompt(repo_path, diff)
 
-        print(path)
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
+    manager = CodebaseStoreManager()
+    manager.set_repo_root(repo_path)
+    manager.set_repo_name(get_repo_name(repo_path))
+    store = manager.get_store()
 
+    context = store_manager_ctx.set(manager)
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    try:
         response = agent_runner.invoke(
             AgentRunnerInput(agent=agent, messages=messages, settings=settings)
         )
 
         if isinstance(response, str):
             # post_merge_request_note(api_v4, token, project_id, mr_iid, response)
+            console.print(response)
             pass
         else:
             raise RuntimeError(f"Unexpected response type: {type(response)}")
 
+    finally:
+        store_manager_ctx.reset(context)
+
 
 @app.command()
-def work():
-    work_agent()
+def work(
+    project_id: str = typer.Argument(..., help="GitLab project ID"),
+    mr_iid: str = typer.Argument(..., help="Merge request IID"),
+):
+    config = load_env()
+    work_agent(
+        config.gitlab_api_v4,
+        project_id,
+        mr_iid,
+        config.gitlab_token,
+    )
 
 
 async def main():

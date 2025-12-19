@@ -98,6 +98,7 @@ class CodebaseVectorStore:
         self.metadata_index: dict[str, list[str]] = {}
 
     def _iter_source_files(self) -> Iterable[Path]:
+        print(f"Iterating source files in {self.repo_root}")
         for path in self.repo_root.rglob("*"):
             if path.is_dir():
                 if path.name in EXCLUDE_DIRS:
@@ -119,6 +120,10 @@ class CodebaseVectorStore:
             if not text.strip():
                 continue
 
+            print(f"Embedding file: {file}")
+            print(f"Text: {text}")
+            print(f"Text length: {len(text)}")
+            print(f"Text chunks: {len(self.splitter.split_text(text))}")
             rel = file.relative_to(self.repo_root)
 
             chunks = self.splitter.split_text(text)
@@ -225,6 +230,7 @@ class CodebaseVectorStore:
     ) -> str:
         file_path = Path(path)
         # the path is relative to the repo root so add the repo root to the path
+        print(f"Reading file: {file_path}")
         file_path = self.repo_root / file_path
         if not file_path.exists():
             raise FileNotFoundError(path)
