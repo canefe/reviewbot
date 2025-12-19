@@ -1,12 +1,11 @@
-# tests/test_search_codebase.py
-
 import subprocess
 import tempfile
 from pathlib import Path
 
 import dotenv
 
-from reviewbot.tools.search_codebase import search_codebase, set_repo_root
+from reviewbot.infra.embeddings.store_manager import CodebaseStoreManager
+from reviewbot.tools.search_codebase import search_codebase
 
 
 def main() -> None:
@@ -24,7 +23,10 @@ def main() -> None:
             check=True,
         )
 
-        set_repo_root(repo_dir)
+        manager = CodebaseStoreManager()
+        manager.set_repo_root(repo_dir)
+        manager.set_repo_name("npcdrops")
+        manager.get_store()
 
         print("=== SEARCH: npcDrops ===")
         res = search_codebase.invoke("how does npcdrops trigger the drop chance?")
