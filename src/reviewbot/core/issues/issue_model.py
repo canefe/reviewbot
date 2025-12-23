@@ -9,8 +9,8 @@ class IssueModel(BaseModel):
     title: str
     description: str
     file_path: str
-    line_number: int
-    column_number: int
+    start_line: int
+    end_line: int
     severity: IssueSeverity
     status: str
 
