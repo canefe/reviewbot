@@ -17,6 +17,75 @@ from reviewbot.core.issues import Issue, IssueModel
 console = Console()
 
 
+def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) -> Any:
+    """
+    Execute a function with exponential backoff retry logic.
+
+    Args:
+        func: The function to execute
+        settings: Settings containing retry configuration
+        *args, **kwargs: Arguments to pass to the function
+
+    Returns:
+        The result of the function call
+
+    Raises:
+        The last exception if all retries fail
+    """
+    max_retries = settings.max_retries
+    retry_delay = settings.retry_delay
+    retry_max_delay = settings.retry_max_delay
+
+    last_exception = None
+
+    for attempt in range(max_retries + 1):  # +1 for initial attempt
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+
+            # If this was the last attempt, raise the exception
+            if attempt >= max_retries:
+                console.print(
+                    f"[red]All {max_retries} retries failed. Last error: {e}[/red]"
+                )
+                raise
+
+            # Calculate delay with exponential backoff
+            delay = min(retry_delay * (2**attempt), retry_max_delay)
+
+            # Check if it's a retryable error
+            error_msg = str(e).lower()
+            is_retryable = any(
+                keyword in error_msg
+                for keyword in [
+                    "rate limit",
+                    "timeout",
+                    "connection",
+                    "network",
+                    "502",
+                    "503",
+                    "504",
+                    "429",
+                ]
+            )
+
+            if not is_retryable:
+                console.print(f"[yellow]Non-retryable error encountered: {e}[/yellow]")
+                raise
+
+            console.print(
+                f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]"
+            )
+            console.print(f"[yellow]Retrying in {delay:.1f} seconds...[/yellow]")
+            time.sleep(delay)
+
+    # This should never be reached, but just in case
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("Retry logic failed unexpectedly")
+
+
 @dataclass
 class IssuesInput:
     agent: Agent
@@ -73,7 +142,7 @@ def monitor_progress(
     start_times = {future: time.time() for future in future_to_file.keys()}
 
     while not stop_event.is_set():
-        time.sleep(3)  # Check every 10 seconds
+        time.sleep(10)  # Check every 10 seconds
 
         current_time = time.time()
         for future, file_path in future_to_file.items():
@@ -94,8 +163,8 @@ def run_concurrent_reviews(
     diffs: List[Any],
     settings: ToolCallerSettings,
     context: Context,
-    max_workers: int = 3,
-    task_timeout: int = 300,  # 5 minutes timeout per file
+    max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
+    task_timeout: int = 160,  # 5 minutes timeout per file
     on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None,
 ) -> List[IssueModel]:
     """
@@ -235,36 +304,96 @@ def review_single_file(
     """
     messages: List[BaseMessage] = [
         SystemMessage(
-            content=f"""You are a code reviewer analyzing a specific file change.
-            
+            content=f"""You are a senior code reviewer analyzing a specific file change.
+
 Your task: Review ONLY the file '{file_path}' from the merge request diff.
+
+IMPORTANT GUIDELINES:
+- Be CONSERVATIVE: Only report real, actionable issues - not stylistic preferences or nitpicks
+- If there are NO legitimate issues, return an empty array: []
+- Do NOT invent issues to justify the review
+- Only report issues with clear negative impact (bugs, security risks, performance problems, logic errors)
+- Avoid reporting issues about code style, formatting, or personal preferences unless they violate critical standards
+- Medium/High severity issues should be reserved for actual bugs, security vulnerabilities, or broken functionality
+
+CRITICAL - KNOWLEDGE CUTOFF AWARENESS:
+⚠️ Your training data has a cutoff date. The code you're reviewing may use:
+- Package versions released AFTER your training (e.g., v2, v3 of libraries)
+- Language versions you don't know about (e.g., Go 1.23+, Python 3.13+)
+- Import paths that have changed since your training
+- APIs that have been updated
+
+DO NOT FLAG as issues:
+❌ Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
+❌ Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
+❌ Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
+❌ Language features you don't recognize (they might be new)
+❌ API methods you don't know (they might have been added)
+
+ONLY flag version/import issues if:
+✅ There's an obvious typo (e.g., "monggo" instead of "mongo")
+✅ The code itself shows an error (e.g., import fails in the diff)
+✅ There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
+
+When in doubt about versions/imports: ASSUME THE DEVELOPER IS CORRECT and skip it.
+
+SUGGESTIONS:
+- When the fix is OBVIOUS and simple, include a "suggestion" field with the corrected code
+- The suggestion should contain ONLY the fixed code (not diff markers like +/-)
+- Only include suggestions for simple fixes (typos, obvious bugs, missing fields, etc.)
+- Do NOT include suggestions for complex refactorings or architectural changes
+- DO NOT suggest version/import changes unless there's an obvious typo
+- Format: just the corrected code, no explanations
 
 Output format: JSON array of issue objects following this schema:
 {IssueModel.model_json_schema()}
 
-Focus on:
-- Code quality issues
-- Potential bugs
-- Security vulnerabilities
-- Performance problems
-- Best practice violations
-- Logic errors
+Focus ONLY on:
+1. **Critical bugs** - Code that will crash or produce incorrect results
+2. **Security vulnerabilities** - Actual exploitable security issues (SQL injection, XSS, etc.)
+3. **Logic errors** - Incorrect business logic or algorithm implementation
+4. **Performance problems** - Clear performance bottlenecks (O(n²) where O(n) is possible, memory leaks, etc.)
+5. **Breaking changes** - Code that breaks existing functionality or APIs
 
-Be specific and reference line numbers from the diff."""
+DO NOT report:
+- Stylistic preferences (variable naming, code organization) unless they severely impact readability
+- Missing comments or documentation
+- Minor code smells that don't impact functionality
+- Hypothetical edge cases without evidence they're relevant
+- Refactoring suggestions unless current code is broken
+- Version numbers, import paths, or package versions you're unfamiliar with
+
+CONTEXT AWARENESS:
+- If you need to verify package versions, you can use read_file to check:
+  - Go: go.mod, go.sum
+  - Python: requirements.txt, pyproject.toml, Pipfile
+  - Node: package.json, package-lock.json
+  - Rust: Cargo.toml, Cargo.lock
+- Use this to understand what versions are ACTUALLY being used in the project
+- Trust the dependency files over your training data
+
+Be specific and reference exact line numbers from the diff."""
         ),
         HumanMessage(
             content=f"""Review the merge request diff for the file: {file_path}
 
-Use the get_diff("{file_path}") tool to retrieve the diff content for this specific file.
+INSTRUCTIONS:
+1. Use the get_diff("{file_path}") tool ONCE to retrieve the diff
+2. Review the diff content directly - DO NOT search for other files or read other files unless absolutely necessary
+3. Output your findings immediately in JSON format
 
-Analyze ONLY this file and output issues in JSON format."""
+Analyze ONLY this file's diff. If you find legitimate issues, output them in JSON format.
+If there are no real issues, output an empty array: []
+
+Be efficient with your tool calls, they are limited, so use them wisely."""
         ),
     ]
 
     try:
         console.print(f"[cyan]Starting review of: {file_path}[/cyan]")
 
-        raw = tool_caller(agent, messages, settings)
+        # Use retry logic for the LLM call
+        raw = with_retry(tool_caller, settings, agent, messages, settings)
 
         console.print(f"[green]Completed review of: {file_path}[/green]")
         console.print(

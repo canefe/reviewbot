@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from rich.console import Console
@@ -171,3 +171,38 @@ def reply_to_discussion(
         discussion_id=discussion_id,
         body=body,
     )
+
+
+def delete_discussion(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    discussion_id: str,
+    note_id: str,
+    timeout: int = 30,
+) -> None:
+    url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions/{discussion_id}/notes/{note_id}"
+    r = requests.delete(
+        url,
+        headers={"PRIVATE-TOKEN": token},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+
+
+def get_all_discussions(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    timeout: int = 30,
+) -> List[Dict[str, Any]]:
+    url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
+    r = requests.get(
+        url,
+        headers={"PRIVATE-TOKEN": token},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()

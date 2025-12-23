@@ -20,6 +20,7 @@ class Issue:
     end_line: int
     severity: IssueSeverity
     status: str
+    suggestion: Optional[str] = None  # Optional code suggestion to fix the issue
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
