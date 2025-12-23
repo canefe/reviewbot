@@ -29,11 +29,11 @@ def main() -> None:
         manager.get_store()
 
         print("=== SEARCH: npcDrops ===")
-        res = search_codebase.invoke("how does npcdrops trigger the drop chance?")
+        res = search_codebase.invoke("how does npcdrops trigger the drop chance?")  # type: ignore
         print(res)
 
         print("\n=== SEARCH: drop chance ===")
-        res = search_codebase.invoke("where is the hook that triggers npc death")
+        res = search_codebase.invoke("where is the hook that triggers npc death")  # type: ignore
         print(res)
 
 

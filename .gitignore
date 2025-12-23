@@ -13,3 +13,4 @@ wheels/
 .DS_Store
 .env
 vectors/
+.env.copy

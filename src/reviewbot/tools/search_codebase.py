@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from pathlib import Path
 from typing import Optional
 
-from langchain.tools import tool
+from langchain.tools import tool  # type: ignore
 from rich.console import Console
 
-from reviewbot.infra.embeddings.store_manager import CodebaseStoreManager
 from reviewbot.context import store_manager_ctx
 
 console = Console()
@@ -25,21 +23,25 @@ def search_codebase(query: str) -> str:
         grep-style matches: file:line:content
     """
     # path is relative to the repo root
-    store = store_manager_ctx.get().get_store()
-    repo_root = Path(store.repo_root).resolve()
+    context = store_manager_ctx.get()
+    store = context.get("store_manager")
+    if not store:
+        raise ValueError("Store manager not found")
+
+    repo_root = store.get_store().repo_root.resolve()
 
     base = repo_root  # or a validated subpath if you support `path`
 
+    max_lines = 200
     cmd = [
         "bash",
         "-lc",
         (
             f"find {shlex.quote(base.as_posix())} -type f "
-            f"! -path '*/.git/*' "
-            f"! -path '*/node_modules/*' "
-            f"! -path '*/.venv/*' "
+            f"! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/.venv/*' "
             f"-print0 | "
-            f"xargs -0 grep -nH --color=never -I {shlex.quote(query)}"
+            f"xargs -0 grep -nH --color=never -I {shlex.quote(query)} | "
+            f"head -n {max_lines}"
         ),
     ]
 
@@ -49,8 +51,10 @@ def search_codebase(query: str) -> str:
         stderr=subprocess.PIPE,
         text=True,
     )
-
+    print(cmd)
+    print("================================================")
     print(result.stdout.strip())
+    print("================================================")
 
     if result.returncode == 1:
         return "No matches found."
@@ -70,17 +74,16 @@ def search_codebase_semantic_search(query: str, path: Optional[str] = None) -> s
     Returns:
         string with the results of the search
     """
-    store = store_manager_ctx.get().get_store()
-    results = store.search(query, top_k=5, path=path)
-    print("tool called")
-    if not results:
-        return "No matches found."
+    context = store_manager_ctx.get()
+    store = context.get("store_manager")
+    if not store:
+        raise ValueError("Store manager not found")
 
-    lines = []
-    for r in results:
-        lines.append(f"{r['path']} (score={r['similarity']:.3f})\n{r['text']}")
+    store = store.get_store()
+    if not store:
+        raise ValueError("Store not found")
 
-    return "\n\n---\n\n".join(lines)
+    return store.search(query, top_k=5, path=path)  # type: ignore
 
 
 @tool
@@ -96,7 +99,14 @@ def read_file(
     Returns:
         string with the contents of the file
     """
-    store = store_manager_ctx.get().get_store()
+    context = store_manager_ctx.get()
+    store = context.get("store_manager")
+    if not store:
+        raise ValueError("Store manager not found")
+
+    store = store.get_store()
+    if not store:
+        raise ValueError("Store not found")
+
     result = store.read_file(path, line_start=line_start, line_end=line_end)
-    console.print(result)
     return result
