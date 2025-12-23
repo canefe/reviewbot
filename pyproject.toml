@@ -9,12 +9,16 @@ dependencies = [
     "faiss-cpu>=1.13.1",
     "langchain>=1.2.0",
     "langchain-community>=0.4.1",
+    "langchain-google-genai>=4.1.2",
     "langchain-openai>=1.1.5",
     "langchain-text-splitters>=1.1.0",
     "langgraph>=1.0.5",
+    "langsmith>=0.5.0",
+    "pytest>=9.0.2",
     "rich>=14.2.0",
     "transformers>=4.57.3",
     "typer>=0.20.0",
+    "xai-review>=0.48.0",
 ]
 [tool.uv]
 package = true
@@ -22,5 +26,10 @@ package = true
 reviewbot = "reviewbot.main:app"
 [tool.pyright]
 typeCheckingMode = "strict"
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.4",
+]
 [project.optional-dependencies]
 examples = ["fastapi"]

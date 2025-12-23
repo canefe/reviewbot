@@ -17,10 +17,6 @@ def get_gpt_model(
     return ChatOpenAI(
         model=llm_model_name,
         api_key=llm_api_key,
-        use_responses_api=True,
-        reasoning={
-            "effort": "low",
-        },
         base_url=base_url,
         temperature=temperature,
     )
