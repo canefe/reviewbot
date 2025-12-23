@@ -12,11 +12,12 @@ llm_model_name = os.getenv("LLM_MODEL")
 
 
 def get_gpt_model(
-    llm_model_name: str, llm_api_key: SecretStr, base_url: str, temperature: float = 0.7
+    llm_model_name: str, llm_api_key: SecretStr, base_url: str, temperature: float = 0.2
 ):
     return ChatOpenAI(
         model=llm_model_name,
         api_key=llm_api_key,
         base_url=base_url,
         temperature=temperature,
+        reasoning_effort="medium",
     )

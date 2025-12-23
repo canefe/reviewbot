@@ -1,3 +1,4 @@
+import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,17 +27,172 @@ from reviewbot.infra.git.clone import clone_repo_persistent, get_repo_name
 from reviewbot.infra.git.repo_tree import tree
 from reviewbot.infra.gitlab.clone import build_clone_url
 from reviewbot.infra.gitlab.diff import FileDiff, fetch_mr_diffs, get_mr_branch
-from reviewbot.infra.gitlab.note import post_discussion, post_discussion_reply
+from reviewbot.infra.gitlab.note import (
+    post_discussion,
+    post_discussion_reply,
+    post_merge_request_note,
+)
 from reviewbot.infra.issues.in_memory_issue_store import InMemoryIssueStore
 from reviewbot.models.gpt import get_gpt_model
 from reviewbot.tools import (
     get_diff,
     read_file,
-    search_codebase,
-    search_codebase_semantic_search,
 )
 
 console = Console()
+
+# Global blacklist for common files that typically don't need code review
+GLOBAL_REVIEW_BLACKLIST = [
+    # Dependency management files
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Gemfile.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "composer.lock",
+    "go.sum",
+    "go.mod",
+    "Cargo.lock",
+    # Build and distribution files
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    "dist/*",
+    "build/*",
+    "*.pyc",
+    "*.pyo",
+    "*.so",
+    "*.dll",
+    "*.exe",
+    "*.o",
+    "*.a",
+    # Generated files
+    "*.generated.*",
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+    "*.pb.go",
+    # Documentation and assets
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.svg",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+    # IDE and editor files
+    ".vscode/*",
+    ".idea/*",
+    "*.swp",
+    "*.swo",
+    "*~",
+]
+
+
+def parse_reviewignore(repo_path: Path) -> List[str]:
+    """
+    Parse .reviewignore file from the repository.
+
+    Args:
+        repo_path: Path to the repository root
+
+    Returns:
+        List of glob patterns to ignore
+    """
+    reviewignore_path = repo_path / ".reviewignore"
+    patterns = []
+
+    if not reviewignore_path.exists():
+        console.print(
+            "[dim].reviewignore file not found, using global blacklist only[/dim]"
+        )
+        return patterns
+
+    try:
+        with open(reviewignore_path, "r", encoding="utf-8") as f:
+            for line in f:
+                # Strip whitespace
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith("#"):
+                    continue
+                patterns.append(line)
+
+        console.print(f"[dim]Loaded {len(patterns)} patterns from .reviewignore[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]Warning: Failed to read .reviewignore: {e}[/yellow]")
+
+    return patterns
+
+
+def should_ignore_file(file_path: str, reviewignore_patterns: List[str]) -> bool:
+    """
+    Check if a file should be ignored based on .reviewignore patterns and global blacklist.
+
+    Args:
+        file_path: Path to the file (relative to repo root)
+        reviewignore_patterns: Patterns from .reviewignore file
+
+    Returns:
+        True if the file should be ignored, False otherwise
+    """
+    # Normalize the file path (remove leading ./ or /)
+    normalized_path = file_path.lstrip("./")
+
+    # Check against global blacklist
+    for pattern in GLOBAL_REVIEW_BLACKLIST:
+        if fnmatch.fnmatch(normalized_path, pattern):
+            return True
+        # Also check just the filename for non-path patterns
+        if "/" not in pattern and fnmatch.fnmatch(Path(normalized_path).name, pattern):
+            return True
+
+    # Check against .reviewignore patterns
+    for pattern in reviewignore_patterns:
+        if fnmatch.fnmatch(normalized_path, pattern):
+            return True
+        # Also check just the filename for non-path patterns
+        if "/" not in pattern and fnmatch.fnmatch(Path(normalized_path).name, pattern):
+            return True
+
+    return False
+
+
+def filter_diffs(
+    diffs: List[FileDiff], reviewignore_patterns: List[str]
+) -> List[FileDiff]:
+    """
+    Filter out diffs for files that should be ignored.
+
+    Args:
+        diffs: List of file diffs
+        reviewignore_patterns: Patterns from .reviewignore file
+
+    Returns:
+        Filtered list of diffs
+    """
+    filtered = []
+    ignored_count = 0
+
+    for diff in diffs:
+        # Use new_path if available, otherwise use old_path
+        file_path = diff.new_path or diff.old_path
+
+        if file_path and should_ignore_file(file_path, reviewignore_patterns):
+            console.print(f"[dim]⊘ Ignoring {file_path}[/dim]")
+            ignored_count += 1
+        else:
+            filtered.append(diff)
+
+    if ignored_count > 0:
+        console.print(
+            f"[cyan]Filtered out {ignored_count} file(s) based on ignore patterns[/cyan]"
+        )
+
+    return filtered
 
 
 def _extract_code_from_diff(diff_patch: str, line_start: int, line_end: int) -> str:
@@ -91,8 +247,12 @@ def _extract_code_from_diff(diff_patch: str, line_start: int, line_end: int) -> 
         if line.startswith("+"):
             # Added line - this is in the new file
             if current_new_line >= line_start and current_new_line <= line_end:
-                # Keep the '+' prefix and the entire line with original whitespace
-                result_lines.append(line)
+                # Ensure space after '+' for proper markdown diff formatting
+                if len(line) > 1 and line[1] != " ":
+                    formatted_line = "+ " + line[1:]
+                else:
+                    formatted_line = line
+                result_lines.append(formatted_line)
             current_new_line += 1
         elif line.startswith("-"):
             continue
@@ -102,14 +262,18 @@ def _extract_code_from_diff(diff_patch: str, line_start: int, line_end: int) -> 
             if in_target_range or (
                 current_old_line >= line_start - 3 and current_old_line <= line_end + 3
             ):
-                # Keep the '-' prefix and the entire line with original whitespace
-                result_lines.append(line)
+                # Ensure space after '-' for proper markdown diff formatting
+                if len(line) > 1 and line[1] != " ":
+                    formatted_line = "- " + line[1:]
+                else:
+                    formatted_line = line
+                result_lines.append(formatted_line)
             current_old_line += 1
         elif line.startswith(" "):
             # Context line - this exists in both old and new files
             # Include context lines within the range and a few lines before/after for structure
             if current_new_line >= line_start - 2 and current_new_line <= line_end + 2:
-                # Keep the space prefix and the entire line with original whitespace
+                # Context lines already have space prefix
                 result_lines.append(line)
             current_new_line += 1
             current_old_line += 1
@@ -148,11 +312,88 @@ def check_agent_messages(state: AgentState, runtime: Runtime) -> dict[str, Any] 
     return None
 
 
+def post_review_acknowledgment(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    agent: Agent,
+    diffs: List[FileDiff],
+) -> None:
+    """
+    Post a surface-level summary acknowledging the review is starting.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        agent: The agent to use for generating summary
+        diffs: List of file diffs
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    # Get list of files being reviewed
+    file_list = [diff.new_path for diff in diffs if diff.new_path]
+    files_summary = "\n".join([f"- `{f}`" for f in file_list[:10]])  # Limit to first 10
+    if len(file_list) > 10:
+        files_summary += f"\n- ... and {len(file_list) - 10} more files"
+
+    # Generate a simple summary with very limited tool calls
+    messages = [
+        SystemMessage(
+            content="""You are a code review assistant. Generate a brief, friendly acknowledgment that a code review is starting.
+
+IMPORTANT:
+- Keep it SHORT (2-3 sentences max)
+- Be surface-level - this is just an acknowledgment, not the actual review
+- DO NOT analyze code yet
+- DO NOT use any tools
+- Just acknowledge what files are being reviewed"""
+        ),
+        HumanMessage(
+            content=f"""A merge request code review is starting for the following files:
+
+{files_summary}
+
+Write a brief acknowledgment message (2-3 sentences) letting the developer know the review is in progress. Be friendly and professional."""
+        ),
+    ]
+
+    try:
+        # Get response with no tool calls allowed
+        from reviewbot.agent.tasks.core import ToolCallerSettings, tool_caller
+
+        summary_settings = ToolCallerSettings(max_tool_calls=0, max_iterations=1)
+        summary = tool_caller(agent, messages, summary_settings)
+
+        # Post as a general MR note
+        acknowledgment_body = f"""🤖 **Code Review Starting**
+
+{summary}
+
+---
+*Review powered by ReviewBot*
+"""
+
+        post_merge_request_note(
+            api_v4=api_v4,
+            token=token,
+            project_id=project_id,
+            mr_iid=mr_iid,
+            body=acknowledgment_body,
+        )
+
+        console.print("[green]✓ Posted review acknowledgment[/green]")
+
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
+        # Don't fail the whole review if acknowledgment fails
+
+
 def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     api_v4 = config.gitlab_api_v4 + "/api/v4"
     token = config.gitlab_token
-    print(config.llm_model_name, config.llm_api_key, config.llm_base_url)
-    input("Press Enter to continue...")
     model = get_gpt_model(
         config.llm_model_name, config.llm_api_key, config.llm_base_url
     )
@@ -161,13 +402,14 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
 
     diffs, diff_refs = fetch_mr_diffs(api_v4, project_id, mr_iid, token)
 
-    settings = ToolCallerSettings(max_tool_calls=10, max_iterations=50)
+    # Limit tool calls to prevent agent from wandering
+    # For diff review: get_diff (1) + maybe read_file for context (1-2) = 3 max
+    settings = ToolCallerSettings(max_tool_calls=5, max_iterations=10)
 
+    # Only provide essential tools - remove search tools to prevent wandering
     tools = [
-        search_codebase,
-        get_diff,
-        read_file,
-        search_codebase_semantic_search,
+        get_diff,  # Primary tool: get the diff for the file
+        read_file,  # Optional: get additional context if needed
     ]
 
     agent: Agent = create_agent(
@@ -180,11 +422,18 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     repo_path = Path(repo_path).resolve()
     repo_tree = tree(repo_path)
 
+    # Parse .reviewignore and filter diffs
+    reviewignore_patterns = parse_reviewignore(repo_path)
+    filtered_diffs = filter_diffs(diffs, reviewignore_patterns)
+    console.print(
+        f"[cyan]Reviewing {len(filtered_diffs)} out of {len(diffs)} changed files[/cyan]"
+    )
+
     manager = CodebaseStoreManager()
     manager.set_repo_root(repo_path)
     manager.set_repo_name(get_repo_name(repo_path))
     manager.set_tree(repo_tree)
-    manager.set_diffs(diffs)
+    manager.set_diffs(filtered_diffs)  # Use filtered diffs instead of all diffs
     manager.get_store()
 
     issue_store = InMemoryIssueStore()
@@ -200,6 +449,16 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
         token=token,
         project_id=project_id,
         mr_iid=mr_iid,
+    )
+
+    # Post acknowledgment that review is starting
+    post_review_acknowledgment(
+        api_v4=api_v4,
+        token=token,
+        project_id=project_id,
+        mr_iid=mr_iid,
+        agent=agent,
+        diffs=filtered_diffs,
     )
 
     try:
@@ -219,7 +478,7 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
                 issue.to_domain() for issue in issues if isinstance(issue, IssueModel)
             ]
             handle_file_issues(
-                file_path, domain_issues, gitlab_config, diffs, diff_refs
+                file_path, domain_issues, gitlab_config, filtered_diffs, diff_refs
             )
 
         # Pass the callback to the agent runner
@@ -263,7 +522,7 @@ def handle_file_issues(
     ],  # Add this parameter (contains base_sha, head_sha, start_sha)
 ) -> None:
     """
-    Create one discussion per issue in the file.
+    Create one discussion per file with the first issue, and reply with subsequent issues.
 
     Args:
         file_path: Path to the file being reviewed
@@ -275,7 +534,9 @@ def handle_file_issues(
     if not issues:
         return
 
-    console.print(f"[cyan]Creating {len(issues)} discussions for {file_path}[/cyan]")
+    console.print(
+        f"[cyan]Creating discussion for {file_path} with {len(issues)} issue(s)[/cyan]"
+    )
 
     # Get the file diff once
     file_diff = next((fd for fd in file_diffs if fd.new_path == file_path), None)
@@ -290,70 +551,149 @@ def handle_file_issues(
         IssueSeverity.LOW: "green",
     }
 
-    # Create one discussion per issue
-    for issue in issues:
-        discussion_title = ""
-        discussion_body = f"""
-<img src="https://badgen.net/badge/issue/{issue.severity.value.upper()}/{severity_color_pairs[issue.severity]}" />
+    discussion_id = None
 
-{issue.description}
+    # Process the first issue - create a discussion with position
+    first_issue = issues[0]
+    discussion_title = ""
+
+    # Build the discussion body with optional suggestion
+    discussion_body = f"""<img src="https://badgen.net/badge/issue/{first_issue.severity.value.upper()}/{severity_color_pairs[first_issue.severity]}" />
+
+{first_issue.description}
 """
 
-        # Create position specific to this issue
-        position = None
-        if file_diff and base_sha and head_sha and start_sha:
-            position = create_position_for_issue(
-                diff_text=file_diff.patch,
-                issue_line_start=issue.start_line,  # Your start line
-                issue_line_end=issue.end_line,  # Your end line
-                base_sha=base_sha,
-                head_sha=head_sha,
-                start_sha=start_sha,
-                old_path=file_diff.old_path,
-                new_path=file_diff.new_path,
-            )
+    # Add suggestion if available (GitLab will render it as an applicable suggestion)
+    if first_issue.suggestion:
+        discussion_body += f"""
 
-        # Create discussion for this specific issue
-        try:
-            discussion_id = create_discussion(
-                title=discussion_title,
-                body=discussion_body,
-                gitlab_config=gitlab_config,
-                position=position,
-            )
+```suggestion
+{first_issue.suggestion}
+```
+"""
+
+    # Create position for the first issue
+    position = None
+    if (
+        file_diff
+        and base_sha
+        and head_sha
+        and start_sha
+        and file_diff.old_path
+        and file_diff.new_path
+    ):
+        position = create_position_for_issue(
+            diff_text=file_diff.patch,
+            issue_line_start=first_issue.start_line,
+            issue_line_end=first_issue.end_line,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            start_sha=start_sha,
+            old_path=file_diff.old_path,
+            new_path=file_diff.new_path,
+        )
+
+    # Create discussion for the first issue
+    try:
+        discussion_id = create_discussion(
+            title=discussion_title,
+            body=discussion_body,
+            gitlab_config=gitlab_config,
+            position=position,
+        )
+        console.print(
+            f"[green]✓ Created discussion for issue at lines {first_issue.start_line}-{first_issue.end_line} (ID: {discussion_id})[/green]"
+        )
+    except Exception as e:
+        if position:
+            # If position was provided and it failed, try without position
             console.print(
-                f"[green]✓ Created discussion for issue at lines {issue.start_line}-{issue.end_line} (ID: {discussion_id})[/green]"
+                f"[yellow]Failed with position for lines {first_issue.start_line}-{first_issue.end_line}, retrying without position: {e}[/yellow]"
             )
-        except Exception as e:
-            if position:
-                # If position was provided and it failed, try without position
-                console.print(
-                    f"[yellow]Failed with position for lines {issue.start_line}-{issue.end_line}, retrying without position: {e}[/yellow]"
+            try:
+                discussion_id = create_discussion(
+                    title=discussion_title,
+                    body=discussion_body,
+                    gitlab_config=gitlab_config,
+                    position=None,
                 )
-                try:
-                    discussion_id = create_discussion(
-                        title=discussion_title,
-                        body=discussion_body,
-                        gitlab_config=gitlab_config,
-                        position=None,
-                    )
-                    console.print(
-                        f"[green]✓ Created discussion without position (ID: {discussion_id})[/green]"
-                    )
-                except Exception as e2:
-                    console.print(
-                        f"[red]✗ Failed to create discussion for issue at lines {issue.start_line}-{issue.end_line}: {e2}[/red]"
-                    )
-                    import traceback
-
-                    traceback.print_exc()
-            else:
                 console.print(
-                    f"[red]✗ Failed to create discussion for issue at lines {issue.start_line}-{issue.end_line}: {e}[/red]"
+                    f"[green]✓ Created discussion without position (ID: {discussion_id})[/green]"
+                )
+            except Exception as e2:
+                console.print(
+                    f"[red]✗ Failed to create discussion for issue at lines {first_issue.start_line}-{first_issue.end_line}: {e2}[/red]"
                 )
                 import traceback
 
                 traceback.print_exc()
+                return  # Can't proceed without a discussion
+        else:
+            console.print(
+                f"[red]✗ Failed to create discussion for issue at lines {first_issue.start_line}-{first_issue.end_line}: {e}[/red]"
+            )
+            import traceback
+
+            traceback.print_exc()
+            return  # Can't proceed without a discussion
+
+    # Process remaining issues - reply to the discussion with diff blocks
+    for issue in issues[1:]:
+        if not discussion_id:
+            console.print(
+                f"[yellow]⚠ Skipping issue at lines {issue.start_line}-{issue.end_line} (no discussion created)[/yellow]"
+            )
+            continue
+
+        # Extract the relevant code from the diff
+        code_snippet = ""
+        if file_diff:
+            code_snippet = _extract_code_from_diff(
+                file_diff.patch,
+                issue.start_line,
+                issue.end_line,
+            )
+
+        # Format the reply with a diff block and optional suggestion
+        reply_body = f"""<img src="https://badgen.net/badge/issue/{issue.severity.value.upper()}/{severity_color_pairs[issue.severity]}" />
+
+{issue.description}
+"""
+
+        # Add suggestion if available (GitLab will render it as an applicable suggestion)
+        if issue.suggestion:
+            reply_body += f"""
+
+```suggestion
+{issue.suggestion}
+```
+"""
+        else:
+            # If no suggestion, show the diff context
+            reply_body += f"""
+
+```diff
+{code_snippet}
+```
+"""
+
+        # Reply to the discussion
+        try:
+            reply_to_discussion(
+                discussion_id=discussion_id,
+                body=reply_body,
+                gitlab_config=gitlab_config,
+            )
+            console.print(
+                f"[green]✓ Added reply for issue at lines {issue.start_line}-{issue.end_line}[/green]"
+            )
+        except Exception as e:
+            console.print(
+                f"[red]✗ Failed to reply for issue at lines {issue.start_line}-{issue.end_line}: {e}[/red]"
+            )
+            import traceback
+
+            traceback.print_exc()
 
 
 def create_position_for_issue(
@@ -388,9 +728,11 @@ def create_position_for_issue(
     current_new = 0
     in_hunk = False
 
-    # Track if we've found the target line
-    found_old_line = None
-    found_new_line = None
+    # Track all candidate lines in the range
+    # Priority: added lines > context lines > deleted lines
+    added_lines = []
+    context_lines = []
+    deleted_lines = []
 
     for line in lines:
         # Check for hunk header
@@ -404,31 +746,43 @@ def create_position_for_issue(
         if not in_hunk:
             continue
 
-        # Check if current line matches our target
+        # Collect all matching lines in the range
         if line.startswith("-"):
             # Deletion - only has old line number
-            if current_old == issue_line_start:
-                found_old_line = current_old
-                found_new_line = None
-                break
+            if current_old >= issue_line_start and current_old <= issue_line_end:
+                deleted_lines.append((current_old, None))
             current_old += 1
         elif line.startswith("+"):
             # Addition - only has new line number
             if current_new >= issue_line_start and current_new <= issue_line_end:
-                found_old_line = None
-                found_new_line = current_new
-                break
+                added_lines.append((None, current_new))
             current_new += 1
         else:
             # Context line - has both
             if current_new >= issue_line_start and current_new <= issue_line_end:
-                found_old_line = current_old
-                found_new_line = current_new
-                break
+                context_lines.append((current_old, current_new))
             current_old += 1
             current_new += 1
 
-    # If we didn't find the line in the diff, return None
+    # Choose the best line to anchor the discussion:
+    # 1. Prefer the first added line (issues are usually about new code)
+    # 2. Fall back to middle context line
+    # 3. Finally use deleted line or start line
+    found_old_line = None
+    found_new_line = None
+
+    if added_lines:
+        # Use the first added line in the range
+        found_old_line, found_new_line = added_lines[0]
+    elif context_lines:
+        # Use the middle context line
+        mid_idx = len(context_lines) // 2
+        found_old_line, found_new_line = context_lines[mid_idx]
+    elif deleted_lines:
+        # Use the first deleted line
+        found_old_line, found_new_line = deleted_lines[0]
+
+    # If we didn't find any line in the diff, return None
     if found_old_line is None and found_new_line is None:
         return None
 

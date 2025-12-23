@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from reviewbot.agent.workflow import GitLabConfig, handle_file_issues
 from reviewbot.context import Context, store_manager_ctx
@@ -19,6 +20,7 @@ from reviewbot.infra.git.clone import clone_repo_persistent, get_repo_name
 from reviewbot.infra.git.repo_tree import tree
 from reviewbot.infra.gitlab.clone import build_clone_url
 from reviewbot.infra.gitlab.diff import fetch_mr_diffs, get_mr_branch
+from reviewbot.infra.gitlab.note import delete_discussion, get_all_discussions
 from reviewbot.infra.issues.in_memory_issue_store import InMemoryIssueStore
 
 
@@ -64,6 +66,53 @@ def sample_issues():
             status="open",
         ),
     ]
+
+
+def test_delete_debug_discussions(
+    gitlab_config: GitLabConfig,
+):
+    """Test that we can delete debug discussions."""
+    api_v4 = gitlab_config.api_v4
+    token = gitlab_config.token
+    project_id = gitlab_config.project_id
+    mr_iid = gitlab_config.mr_iid
+
+    # get all discussions for the merge request
+    discussions = get_all_discussions(api_v4, token, project_id, mr_iid)
+    console = Console()
+    console.print(f"[cyan]Found {len(discussions)} total discussions[/cyan]")
+
+    # Filter discussions where ANY note has author.id == 83
+    discussion_note_ids = []
+    for discussion in discussions:
+        if not discussion.get("notes"):
+            continue
+
+        # Check if ANY note in this discussion is from author 83
+        for note in discussion["notes"]:
+            if note.get("author", {}).get("id") == 83:
+                # Add this discussion with its first note ID (required for deletion)
+                discussion_note_ids.append(
+                    (discussion["id"], discussion["notes"][0]["id"])
+                )
+                break  # Only add once per discussion
+
+    console.print(
+        f"[yellow]Found {len(discussion_note_ids)} discussions from author 83[/yellow]"
+    )
+
+    # Delete each discussion
+    for discussion_id, note_id in discussion_note_ids:
+        try:
+            console.print(
+                f"[yellow]Deleting discussion {discussion_id}, note {note_id}[/yellow]"
+            )
+            delete_discussion(api_v4, token, project_id, mr_iid, discussion_id, note_id)
+            console.print(f"[green]✓ Deleted discussion {discussion_id}[/green]")
+        except Exception as e:
+            console.print(
+                f"[red]✗ Failed to delete discussion {discussion_id}: {e}[/red]"
+            )
 
 
 def test_handle_file_issues_creates_discussion(
