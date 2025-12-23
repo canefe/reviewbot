@@ -3,7 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.func import task
@@ -22,6 +22,7 @@ class IssuesInput:
     agent: Agent
     context: Context
     settings: ToolCallerSettings
+    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
 
 
 @task
@@ -32,6 +33,7 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
     agent = ctx.agent
     context = ctx.context
     settings = ctx.settings
+    on_file_complete = ctx.on_file_complete
 
     issue_store = context.get("issue_store")
     if not issue_store:
@@ -51,8 +53,10 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
     if not tree or not diffs:
         raise ValueError("Tree or diffs not found")
 
-    # Run concurrent reviews - pass the context values
-    all_issues = run_concurrent_reviews(agent, diffs, settings, context)
+    # Run concurrent reviews - pass the context values and callback
+    all_issues = run_concurrent_reviews(
+        agent, diffs, settings, context, on_file_complete=on_file_complete
+    )
 
     # Convert to domain objects
     return [issue.to_domain() for issue in all_issues]
@@ -77,11 +81,11 @@ def monitor_progress(
                 elapsed = current_time - start_times[future]
                 if elapsed > task_timeout:
                     console.print(
-                        f"[red]⚠️  TIMEOUT WARNING: {file_path} has been running for {elapsed:.0f}s[/red]"
+                        f"[red]TIMEOUT WARNING: {file_path} has been running for {elapsed:.0f}s[/red]"
                     )
                 else:
                     console.print(
-                        f"[yellow]⏳ Still processing: {file_path} ({elapsed:.0f}s elapsed)[/yellow]"
+                        f"[yellow]Still processing: {file_path} ({elapsed:.0f}s elapsed)[/yellow]"
                     )
 
 
@@ -92,14 +96,25 @@ def run_concurrent_reviews(
     context: Context,
     max_workers: int = 3,
     task_timeout: int = 300,  # 5 minutes timeout per file
+    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None,
 ) -> List[IssueModel]:
     """
     Run concurrent reviews of all diff files with context propagation and monitoring.
+
+    Args:
+        agent: The agent to use for reviews
+        diffs: List of diff objects
+        settings: Tool caller settings
+        context: Context object
+        max_workers: Maximum number of concurrent workers
+        task_timeout: Timeout per task in seconds
+        on_file_complete: Optional callback function called when each file's review completes.
+                         Receives (file_path, issues) as arguments.
     """
     diff_file_paths = [diff.new_path for diff in diffs]
 
     console.print(
-        f"[bold]🚀 Starting concurrent review of {len(diff_file_paths)} files[/bold]"
+        f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]"
     )
     console.print(f"[dim]Files: {', '.join(diff_file_paths)}[/dim]\n")
 
@@ -141,6 +156,18 @@ def run_concurrent_reviews(
                 console.print(
                     f"[green]✓[/green] Processed {file_path}: {len(issues)} issues"
                 )
+
+                # Call the callback if provided, allowing immediate discussion creation
+                if on_file_complete:
+                    try:
+                        on_file_complete(file_path, issues)
+                    except Exception as e:
+                        console.print(
+                            f"[red]Error in on_file_complete callback for {file_path}: {e}[/red]"
+                        )
+                        import traceback
+
+                        traceback.print_exc()
             except TimeoutError:
                 console.print(
                     f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s"
@@ -156,11 +183,11 @@ def run_concurrent_reviews(
         monitor_thread.join(timeout=1)
 
     console.print(
-        f"\n[bold green]🎉 Review complete! Total issues found: {len(all_issues)}[/bold green]"
+        f"\n[bold green]Review complete! Total issues found: {len(all_issues)}[/bold green]"
     )
 
     if all_issues:
-        console.print("\n[bold]📋 Issues by file:[/bold]")
+        console.print("\n[bold]Issues by file:[/bold]")
         file_issue_count: dict[str, int] = {}
         for issue in all_issues:
             file_path = getattr(issue, "file_path", "unknown")
@@ -186,12 +213,12 @@ def review_single_file_with_context(
         # Set the context var for this thread
         store_manager_ctx.set(context)
 
-        console.print(f"[dim]🔧 Context set for thread processing: {file_path}[/dim]")
+        console.print(f"[dim]Context set for thread processing: {file_path}[/dim]")
 
         # Now call the actual review function
         return review_single_file(agent, file_path, settings)
     except Exception as e:
-        console.print(f"[red]❌ Exception in thread for {file_path}: {e}[/red]")
+        console.print(f"[red]Exception in thread for {file_path}: {e}[/red]")
         import traceback
 
         traceback.print_exc()
@@ -235,11 +262,11 @@ Analyze ONLY this file and output issues in JSON format."""
     ]
 
     try:
-        console.print(f"[cyan]🔍 Starting review of: {file_path}[/cyan]")
+        console.print(f"[cyan]Starting review of: {file_path}[/cyan]")
 
         raw = tool_caller(agent, messages, settings)
 
-        console.print(f"[green]✅ Completed review of: {file_path}[/green]")
+        console.print(f"[green]Completed review of: {file_path}[/green]")
         console.print(
             f"Raw response: {raw[:200]}..."
             if len(str(raw)) > 200
@@ -259,25 +286,21 @@ Analyze ONLY this file and output issues in JSON format."""
                             issues.append(IssueModel.model_validate(issue_data))
                         except Exception as e:
                             console.print(
-                                f"[yellow]⚠️  Failed to validate issue: {e}[/yellow]"
+                                f"[yellow]Failed to validate issue: {e}[/yellow]"
                             )
                 elif isinstance(parsed, dict):
                     try:
                         issues.append(IssueModel.model_validate(parsed))
                     except Exception as e:
-                        console.print(
-                            f"[yellow]⚠️  Failed to validate issue: {e}[/yellow]"
-                        )
+                        console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
             except json.JSONDecodeError as e:
-                console.print(
-                    f"[red]❌ Failed to parse JSON for {file_path}: {e}[/red]"
-                )
+                console.print(f"[red]Failed to parse JSON for {file_path}: {e}[/red]")
 
-        console.print(f"[blue]📊 Found {len(issues)} issues in {file_path}[/blue]")
+        console.print(f"[blue]Found {len(issues)} issues in {file_path}[/blue]")
         return issues
 
     except Exception as e:
-        console.print(f"[red]❌ Error reviewing {file_path}: {e}[/red]")
+        console.print(f"[red]Error reviewing {file_path}: {e}[/red]")
         import traceback
 
         traceback.print_exc()

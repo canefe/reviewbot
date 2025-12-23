@@ -1,3 +1,5 @@
+from typing import Any, Dict, Optional
+
 import requests
 from rich.console import Console
 
@@ -33,21 +35,63 @@ def post_discussion(
     project_id: str,
     mr_iid: str,
     body: str,
+    position: Optional[Dict[str, Any]] = None,
     timeout: int = 30,
 ) -> str:
     """
     Create a new discussion and return its ID.
 
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        body: Discussion body content
+        position: Optional position object for file-based discussions
+        timeout: Request timeout
+
     Returns:
         The discussion ID from GitLab
     """
     url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
+
+    # Prepare request data
+    # Note: GitLab requires either line_code or complete position with line numbers
+    # For file-level discussions without specific lines, don't include position
+    data: Dict[str, Any] = {"body": body}
+    if position:
+        # Only include position if it has required fields (new_line or old_line)
+        # Otherwise GitLab will reject it as incomplete
+        has_line_info = (
+            "new_line" in position or "old_line" in position or "line_code" in position
+        )
+        if has_line_info:
+            data["position"] = position
+        else:
+            # Position is incomplete, skip it for file-level discussions
+            console.print(
+                "[yellow]Position object missing line information, creating discussion without position[/yellow]"
+            )
+
+    # Use json parameter to send as JSON (not form data)
+    # This is required for nested objects like position
     r = requests.post(
         url,
         headers={"PRIVATE-TOKEN": token},
-        data={"body": body},
+        json=data,
         timeout=timeout,
     )
+
+    # Log error details if request fails
+    if r.status_code >= 400:
+        console.print(f"[red]Request failed with status {r.status_code}[/red]")
+        console.print(f"[red]Request data: {data}[/red]")
+        try:
+            error_response = r.json()
+            console.print(f"[red]Error response: {error_response}[/red]")
+        except Exception:
+            console.print(f"[red]Error response text: {r.text}[/red]")
+
     r.raise_for_status()
 
     # GitLab returns the created discussion with an 'id' field

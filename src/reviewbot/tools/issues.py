@@ -9,8 +9,8 @@ def add_issue(
     title: str,
     description: str,
     file_path: str,
-    line_number: int,
-    column_number: int,
+    start_line: int,
+    end_line: int,
     severity: IssueSeverity,
     status: str,
 ) -> str:
@@ -20,8 +20,8 @@ def add_issue(
         title: title of the issue
         description: description of the issue
         file_path: path to the file that contains the issue
-        line_number: line number of the issue
-        column_number: column number of the issue
+        start_line: start line number of the issue
+        end_line: end line number of the issue
         severity: severity of the issue
         status: status of the issue
 
@@ -37,8 +37,8 @@ def add_issue(
         title=title,
         description=description,
         file_path=file_path,
-        line_number=line_number,
-        column_number=column_number,
+        start_line=start_line,
+        end_line=end_line,
         severity=severity,
         status=status,
     )
