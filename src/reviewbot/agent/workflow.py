@@ -322,6 +322,7 @@ def post_review_acknowledgment(
 ) -> None:
     """
     Post a surface-level summary acknowledging the review is starting.
+    Only posts if no acknowledgment already exists to prevent duplicates.
 
     Args:
         api_v4: GitLab API v4 base URL
@@ -332,6 +333,30 @@ def post_review_acknowledgment(
         diffs: List of file diffs
     """
     from langchain_core.messages import HumanMessage, SystemMessage
+
+    from reviewbot.infra.gitlab.note import get_merge_request_notes
+
+    # Check if an acknowledgment already exists
+    try:
+        notes = get_merge_request_notes(
+            api_v4=api_v4,
+            token=token,
+            project_id=project_id,
+            mr_iid=mr_iid,
+        )
+
+        # Check if any note contains the acknowledgment marker
+        acknowledgment_marker = "🤖 **Code Review Starting**"
+        for note in notes:
+            body = note.get("body", "")
+            if acknowledgment_marker in body:
+                console.print("[dim]Acknowledgment already exists, skipping[/dim]")
+                return
+    except Exception as e:
+        console.print(
+            f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]"
+        )
+        # Continue anyway - better to post a duplicate than miss it
 
     # Get list of files being reviewed
     file_list = [diff.new_path for diff in diffs if diff.new_path]

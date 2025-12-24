@@ -206,3 +206,33 @@ def get_all_discussions(
     )
     r.raise_for_status()
     return r.json()
+
+
+def get_merge_request_notes(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    timeout: int = 30,
+) -> List[Dict[str, Any]]:
+    """
+    Get all notes (comments) for a merge request.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        timeout: Request timeout
+
+    Returns:
+        List of note dictionaries from GitLab API
+    """
+    url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/notes"
+    r = requests.get(
+        url,
+        headers={"PRIVATE-TOKEN": token},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
