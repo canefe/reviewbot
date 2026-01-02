@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from typing import Optional
 
 from langchain.tools import tool  # type: ignore
 from rich.console import Console
@@ -46,10 +45,9 @@ def search_codebase(query: str) -> str:
     ]
 
     result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    cmd,
+    capture_output=True,
+    text=True,
     )
     print(cmd)
     print("================================================")
@@ -65,7 +63,7 @@ def search_codebase(query: str) -> str:
 
 
 @tool
-def search_codebase_semantic_search(query: str, path: Optional[str] = None) -> str:
+def search_codebase_semantic_search(query: str, path: str | None = None) -> str:
     """Search the codebase for the given query. If a path is provided, search the codebase for the given query in the given path.
 
     Args:
@@ -87,7 +85,7 @@ def search_codebase_semantic_search(query: str, path: Optional[str] = None) -> s
 
 
 @tool
-def read_file(path: str, line_start: Optional[int] = None, line_end: Optional[int] = None) -> str:
+def read_file(path: str, line_start: int | None = None, line_end: int | None = None) -> str:
     """Read the file at the given path.
 
     Args:

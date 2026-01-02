@@ -1,7 +1,7 @@
+import hashlib
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import hashlib
 
 
 class GitCloneError(RuntimeError):
@@ -20,8 +20,7 @@ def clone_repo_tmp(repo_url: str, *, branch: str | None = None) -> TemporaryDire
         subprocess.run(
             cmd,
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
     except subprocess.CalledProcessError as e:
@@ -55,8 +54,7 @@ def clone_repo_persistent(
             ["git", "fetch", "--all", "--prune"],
             cwd=repo_dir,
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
         if branch:
@@ -81,8 +79,7 @@ def clone_repo_persistent(
         subprocess.run(
             cmd,
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
     except subprocess.CalledProcessError as e:
@@ -97,8 +94,7 @@ def get_repo_name(repo_dir: Path) -> str:
         cmd,
         check=True,
         cwd=repo_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     return result.stdout.strip()

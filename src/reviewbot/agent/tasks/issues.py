@@ -1,9 +1,10 @@
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, List, Optional
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.func import task
@@ -87,12 +88,12 @@ class IssuesInput:
     agent: Agent
     context: Context
     settings: ToolCallerSettings
-    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
-    quick_scan_agent: Optional[Agent] = None
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
+    quick_scan_agent: Agent | None = None
 
 
 @task
-def identify_issues(ctx: IssuesInput) -> List[Issue]:
+def identify_issues(ctx: IssuesInput) -> list[Issue]:
     """
     Identify the issues in the codebase using concurrent agents per file.
     """
@@ -163,14 +164,14 @@ def monitor_progress(
 
 def run_concurrent_reviews(
     agent: Any,
-    diffs: List[Any],
+    diffs: list[Any],
     settings: ToolCallerSettings,
     context: Context,
     max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
-    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None,
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
     quick_scan_agent: Any | None = None,
-) -> List[IssueModel]:
+) -> list[IssueModel]:
     """
     Run concurrent reviews of all diff files with context propagation and monitoring.
 
@@ -191,7 +192,7 @@ def run_concurrent_reviews(
     console.print(f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]")
     console.print(f"[dim]Files: {', '.join(diff_file_paths)}[/dim]\n")
 
-    all_issues: List[IssueModel] = []
+    all_issues: list[IssueModel] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Create a partial function with context baked in
@@ -276,7 +277,7 @@ def quick_scan_file(
     Quick scan with low-effort agent to determine if file needs deep review.
     Returns True if file needs deep review, False otherwise.
     """
-    messages: List[BaseMessage] = [
+    messages: list[BaseMessage] = [
         SystemMessage(
             content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
 
@@ -330,7 +331,7 @@ def review_single_file_with_context(
     settings: ToolCallerSettings,
     context: Context,
     quick_scan_agent: Any | None = None,
-) -> List[IssueModel]:
+) -> list[IssueModel]:
     """
     Wrapper that sets context before reviewing.
     This runs in each worker thread.
@@ -362,11 +363,11 @@ def review_single_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
-) -> List[IssueModel]:
+) -> list[IssueModel]:
     """
     Review a single diff file and return issues found.
     """
-    messages: List[BaseMessage] = [
+    messages: list[BaseMessage] = [
         SystemMessage(
             content=f"""You are a senior code reviewer analyzing a specific file change.
 
@@ -465,7 +466,7 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
         )
 
         # Parse issues from response
-        issues: List[IssueModel] = []
+        issues: list[IssueModel] = []
         if isinstance(raw, str):
             try:
                 import json

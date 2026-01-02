@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, Optional
+from collections.abc import Iterable
 from uuid import UUID
 
 from reviewbot.core.issues.issue import Issue
@@ -7,12 +7,12 @@ from reviewbot.core.issues.issue_store import IssueStore
 
 class InMemoryIssueStore(IssueStore):
     def __init__(self) -> None:
-        self._items: Dict[UUID, Issue] = {}
+        self._items: dict[UUID, Issue] = {}
 
     def add(self, issue: Issue) -> None:
         self._items[issue.id] = issue
 
-    def get(self, issue_id: UUID) -> Optional[Issue]:
+    def get(self, issue_id: UUID) -> Issue | None:
         return self._items.get(issue_id)
 
     def list(self) -> Iterable[Issue]:

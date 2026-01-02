@@ -1,5 +1,5 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
 
 from langgraph.func import entrypoint  # type: ignore
 from rich.console import Console
@@ -19,12 +19,12 @@ class AgentRunnerInput:
     agent: Agent
     context: Context
     settings: ToolCallerSettings = field(default_factory=ToolCallerSettings)
-    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
-    quick_scan_agent: Optional[Agent] = None
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
+    quick_scan_agent: Agent | None = None
 
 
 @entrypoint()
-def agent_runner(input: AgentRunnerInput) -> List[Issue]:
+def agent_runner(input: AgentRunnerInput) -> list[Issue]:
     agent = input.agent
     settings = input.settings
     context = input.context

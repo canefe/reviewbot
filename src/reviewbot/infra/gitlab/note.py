@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 from rich.console import Console
@@ -33,7 +33,7 @@ def post_discussion(
     project_id: str,
     mr_iid: str,
     body: str,
-    position: Optional[Dict[str, Any]] = None,
+    position: dict[str, Any] | None = None,
     timeout: int = 30,
 ) -> str:
     """
@@ -56,7 +56,7 @@ def post_discussion(
     # Prepare request data
     # Note: GitLab requires either line_code or complete position with line numbers
     # For file-level discussions without specific lines, don't include position
-    data: Dict[str, Any] = {"body": body}
+    data: dict[str, Any] = {"body": body}
     if position:
         # Only include position if it has required fields (new_line or old_line)
         # Otherwise GitLab will reject it as incomplete
@@ -193,7 +193,7 @@ def get_all_discussions(
     project_id: str,
     mr_iid: str,
     timeout: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
     r = requests.get(
         url,
@@ -210,7 +210,7 @@ def get_merge_request_notes(
     project_id: str,
     mr_iid: str,
     timeout: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Get all notes (comments) for a merge request.
 

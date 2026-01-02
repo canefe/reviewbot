@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import List, Optional
 
 from reviewbot.infra.embeddings.openai import CodebaseVectorStore
 from reviewbot.infra.gitlab.diff import FileDiff
@@ -7,11 +6,11 @@ from reviewbot.infra.gitlab.diff import FileDiff
 
 class CodebaseStoreManager:
     def __init__(self) -> None:
-        self._store: Optional[CodebaseVectorStore] = None
-        self._repo_root: Optional[Path] = None
-        self._repo_name: Optional[str] = None
-        self._tree: Optional[str] = None
-        self._diffs: Optional[List[FileDiff]] = None
+        self._store: CodebaseVectorStore | None = None
+        self._repo_root: Path | None = None
+        self._repo_name: str | None = None
+        self._tree: str | None = None
+        self._diffs: list[FileDiff] | None = None
 
     def set_repo_root(self, path: str | Path) -> None:
         self._repo_root = Path(path).resolve()
@@ -28,7 +27,7 @@ class CodebaseStoreManager:
     def set_tree(self, tree: str) -> None:
         self._tree = tree
 
-    def set_diffs(self, diffs: List[FileDiff]) -> None:
+    def set_diffs(self, diffs: list[FileDiff]) -> None:
         self._diffs = diffs
 
     def get_tree(self) -> str:
@@ -36,7 +35,7 @@ class CodebaseStoreManager:
             raise ValueError("Tree not set")
         return self._tree
 
-    def get_diffs(self) -> List[FileDiff]:
+    def get_diffs(self) -> list[FileDiff]:
         if self._diffs is None:
             raise ValueError("Diff not set")
         return self._diffs

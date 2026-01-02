@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -49,7 +49,6 @@ EXCLUDE_DIRS = {
     "temp",
     "tmp",
     "tempdata",
-    "tempfiles",
     "tempfiles",
 }
 
@@ -108,8 +107,8 @@ class CodebaseVectorStore:
                     continue
                 yield path
 
-    def _load_documents(self) -> List[Document]:
-        docs: List[Document] = []
+    def _load_documents(self) -> list[Document]:
+        docs: list[Document] = []
 
         for file in self._iter_source_files():
             try:
@@ -185,7 +184,7 @@ class CodebaseVectorStore:
         )
 
         if self.metadata_path.exists():
-            with open(self.metadata_path, "r", encoding="utf-8") as f:
+            with open(self.metadata_path, encoding="utf-8") as f:
                 self.metadata_index = json.load(f)
 
         return True
@@ -195,7 +194,7 @@ class CodebaseVectorStore:
         query: str,
         *,
         top_k: int = 10,
-        path: Optional[str] = None,
+        path: str | None = None,
     ) -> list[dict]:
         if not self.vector_store:
             raise RuntimeError("Vector store not loaded")
@@ -221,8 +220,8 @@ class CodebaseVectorStore:
     def read_file(
         self,
         path: str,
-        line_start: Optional[int] = None,
-        line_end: Optional[int] = None,
+        line_start: int | None = None,
+        line_end: int | None = None,
     ) -> str:
         file_path = Path(path)
         # the path is relative to the repo root so add the repo root to the path

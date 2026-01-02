@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from rich.console import Console
@@ -35,7 +35,7 @@ class ToolCallerSettings:
     """
 
 
-def tool_caller(agent: Any, messages: List[BaseMessage], settings: ToolCallerSettings) -> str:
+def tool_caller(agent: Any, messages: list[BaseMessage], settings: ToolCallerSettings) -> str:
     finished = False
     final_response = None
     max_tool_calls = settings.max_tool_calls
@@ -128,7 +128,7 @@ def tool_caller(agent: Any, messages: List[BaseMessage], settings: ToolCallerSet
 
 
 def tool_caller_stream(
-    agent: Any, messages: List[BaseMessage], settings: ToolCallerSettings
+    agent: Any, messages: list[BaseMessage], settings: ToolCallerSettings
 ) -> str:
     finished = False
     final_response = None
@@ -143,17 +143,7 @@ def tool_caller_stream(
                 latest_message = chunk["messages"][-1]
 
                 if isinstance(latest_message, AIMessage):
-                    content = latest_message.content
-                    if isinstance(content, list):
-                        if content and "content" in content[-1]:
-                            reason = content[-1]["content"][-1]["text"]
-                        elif content and "text" in content[-1]:
-                            reason = content[-1]["text"]
-                        else:
-                            reason = str(content)
-                    else:
-                        reason = content
-                    final_response = content
+                    final_response = latest_message.content
 
                 elif isinstance(latest_message, ToolMessage):
                     tool_call_count += 1
