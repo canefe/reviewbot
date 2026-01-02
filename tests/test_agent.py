@@ -62,9 +62,7 @@ def test_agent():
     project_id = "29"
     mr_iid = "5"
 
-    model = get_gpt_model(
-        config.llm_model_name, config.llm_api_key, config.llm_base_url
-    )
+    model = get_gpt_model(config.llm_model_name, config.llm_api_key, config.llm_base_url)
 
     clone_url = build_clone_url(api_v4, project_id, token)
 
@@ -96,15 +94,11 @@ def test_agent():
     manager.get_store()
 
     issue_store = InMemoryIssueStore()
-    token = store_manager_ctx.set(
-        Context(store_manager=manager, issue_store=issue_store)
-    )
+    token = store_manager_ctx.set(Context(store_manager=manager, issue_store=issue_store))
 
     context = store_manager_ctx.get()
 
-    diff_file_paths = " ".join(
-        [diff.new_path for diff in diffs if diff.new_path is not None]
-    )
+    diff_file_paths = " ".join([diff.new_path for diff in diffs if diff.new_path is not None])
     try:
         response = agent.invoke(  # type: ignore
             {

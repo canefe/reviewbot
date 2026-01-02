@@ -3,13 +3,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import hashlib
 
+
 class GitCloneError(RuntimeError):
     pass
 
 
-def clone_repo_tmp(
-    repo_url: str, *, branch: str | None = None
-) -> TemporaryDirectory[str]:
+def clone_repo_tmp(repo_url: str, *, branch: str | None = None) -> TemporaryDirectory[str]:
     tmp = TemporaryDirectory(prefix="reviewbot-")
     dest = Path(tmp.name)
 
@@ -31,11 +30,15 @@ def clone_repo_tmp(
 
     return tmp
 
+
 def _repo_key(repo_url: str, branch: str | None) -> str:
     key = f"{repo_url}::{branch or 'default'}"
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
+
 BASE_REPO_DIR = Path.home() / "reviewbot" / "repos"
+
+
 def clone_repo_persistent(
     repo_url: str,
     *,
@@ -86,6 +89,7 @@ def clone_repo_persistent(
         raise GitCloneError(e.stderr.strip() or e.stdout.strip()) from e
 
     return repo_dir
+
 
 def get_repo_name(repo_dir: Path) -> str:
     cmd = ["git", "rev-parse", "--short", "HEAD"]

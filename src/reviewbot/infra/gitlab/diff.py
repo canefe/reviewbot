@@ -225,9 +225,7 @@ def fetch_mr_diffs(
                 if not diff_text or change.get("too_large", False):
                     # Fallback to raw diff endpoint for this file
                     raw_diff_url = f"{mr_url}/diffs"
-                    raw_response = requests.get(
-                        raw_diff_url, headers=headers, timeout=timeout
-                    )
+                    raw_response = requests.get(raw_diff_url, headers=headers, timeout=timeout)
                     raw_response.raise_for_status()
                     raw_diff = raw_response.text
 
@@ -238,9 +236,7 @@ def fetch_mr_diffs(
                         if not lines or not lines[0].startswith("diff --git "):
                             continue
 
-                        chunk_old_path, chunk_new_path, _, _, _ = (
-                            _parse_paths_from_chunk(lines)
-                        )
+                        chunk_old_path, chunk_new_path, _, _, _ = _parse_paths_from_chunk(lines)
                         if (chunk_new_path == change_new_path) or (
                             chunk_old_path == change_old_path
                         ):
@@ -299,9 +295,7 @@ def fetch_mr_diffs(
             extracted_old_line: Optional[int] = None
 
             # Parse diff to find first hunk and line numbers
-            hunk_header_pattern = re.compile(
-                r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
-            )
+            hunk_header_pattern = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
             for diff_line in chunk.splitlines():
                 match = hunk_header_pattern.match(diff_line)
                 if match:
@@ -344,9 +338,7 @@ def fetch_mr_diffs(
     return out, diff_refs
 
 
-def get_mr_branch(
-    api_v4: str, project_id: str, mr_iid: str, token: str, timeout: int = 30
-) -> str:
+def get_mr_branch(api_v4: str, project_id: str, mr_iid: str, token: str, timeout: int = 30) -> str:
     api_v4 = api_v4.rstrip("/")
     headers = {"PRIVATE-TOKEN": token}
     mr_url = f"{api_v4}/projects/{project_id}/merge_requests/{mr_iid}"

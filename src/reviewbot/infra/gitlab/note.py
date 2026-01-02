@@ -24,9 +24,7 @@ def post_merge_request_note(
     )
 
     if r.status_code >= 300:
-        raise RuntimeError(
-            f"gitlab note post failed: {r.status_code} {r.reason}: {r.text}"
-        )
+        raise RuntimeError(f"gitlab note post failed: {r.status_code} {r.reason}: {r.text}")
 
 
 def post_discussion(
@@ -62,9 +60,7 @@ def post_discussion(
     if position:
         # Only include position if it has required fields (new_line or old_line)
         # Otherwise GitLab will reject it as incomplete
-        has_line_info = (
-            "new_line" in position or "old_line" in position or "line_code" in position
-        )
+        has_line_info = "new_line" in position or "old_line" in position or "line_code" in position
         if has_line_info:
             data["position"] = position
         else:

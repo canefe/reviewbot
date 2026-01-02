@@ -92,27 +92,19 @@ def test_delete_debug_discussions(
         for note in discussion["notes"]:
             if note.get("author", {}).get("id") == 83:
                 # Add this discussion with its first note ID (required for deletion)
-                discussion_note_ids.append(
-                    (discussion["id"], discussion["notes"][0]["id"])
-                )
+                discussion_note_ids.append((discussion["id"], discussion["notes"][0]["id"]))
                 break  # Only add once per discussion
 
-    console.print(
-        f"[yellow]Found {len(discussion_note_ids)} discussions from author 83[/yellow]"
-    )
+    console.print(f"[yellow]Found {len(discussion_note_ids)} discussions from author 83[/yellow]")
 
     # Delete each discussion
     for discussion_id, note_id in discussion_note_ids:
         try:
-            console.print(
-                f"[yellow]Deleting discussion {discussion_id}, note {note_id}[/yellow]"
-            )
+            console.print(f"[yellow]Deleting discussion {discussion_id}, note {note_id}[/yellow]")
             delete_discussion(api_v4, token, project_id, mr_iid, discussion_id, note_id)
             console.print(f"[green]✓ Deleted discussion {discussion_id}[/green]")
         except Exception as e:
-            console.print(
-                f"[red]✗ Failed to delete discussion {discussion_id}: {e}[/red]"
-            )
+            console.print(f"[red]✗ Failed to delete discussion {discussion_id}: {e}[/red]")
 
 
 def test_handle_file_issues_creates_discussion(
@@ -144,9 +136,7 @@ def test_handle_file_issues_creates_discussion(
 
     # Set up context for tools (needed for read_file.invoke())
     issue_store = InMemoryIssueStore()
-    token_ctx = store_manager_ctx.set(
-        Context(store_manager=manager, issue_store=issue_store)
-    )
+    token_ctx = store_manager_ctx.set(Context(store_manager=manager, issue_store=issue_store))
 
     try:
         # Call the function - this will make real API calls to GitLab
@@ -195,9 +185,7 @@ def test_code_block_in_markdown_between_line_numbers(
 
     # Set up context for tools
     issue_store = InMemoryIssueStore()
-    token_ctx = store_manager_ctx.set(
-        Context(store_manager=manager, issue_store=issue_store)
-    )
+    token_ctx = store_manager_ctx.set(Context(store_manager=manager, issue_store=issue_store))
 
     # Find a file that actually has changes in the diff
     if not diffs:
@@ -205,9 +193,7 @@ def test_code_block_in_markdown_between_line_numbers(
 
     # Use the first file with a diff
     # get the first .go file
-    go_files = [
-        file for file in diffs if file.new_path and file.new_path.endswith(".go")
-    ]
+    go_files = [file for file in diffs if file.new_path and file.new_path.endswith(".go")]
     if not go_files:
         pytest.skip("No .go files found in diff")
     file_diff = go_files[1]
@@ -231,9 +217,7 @@ def test_code_block_in_markdown_between_line_numbers(
             new_start = int(match.group(3))
             new_count = int(match.group(4)) if match.group(4) else 1
             line_start = new_start
-            line_end = min(
-                new_start + new_count - 1, new_start + 10
-            )  # Limit to reasonable range
+            line_end = min(new_start + new_count - 1, new_start + 10)  # Limit to reasonable range
             break
 
     if line_start is None or line_end is None:
@@ -264,12 +248,8 @@ def test_code_block_in_markdown_between_line_numbers(
     try:
         # Mock the GitLab API calls to capture the reply body
         with (
-            patch(
-                "reviewbot.agent.workflow.create_discussion"
-            ) as mock_create_discussion,
-            patch(
-                "reviewbot.agent.workflow.reply_to_discussion"
-            ) as mock_reply_to_discussion,
+            patch("reviewbot.agent.workflow.create_discussion") as mock_create_discussion,
+            patch("reviewbot.agent.workflow.reply_to_discussion") as mock_reply_to_discussion,
         ):
             mock_create_discussion.return_value = "discussion-123"
 
@@ -283,9 +263,7 @@ def test_code_block_in_markdown_between_line_numbers(
             reply_body = call_args.kwargs["body"]
 
             # Verify the code block uses diff syntax
-            assert "```diff" in reply_body, (
-                "Code block should use diff syntax highlighting"
-            )
+            assert "```diff" in reply_body, "Code block should use diff syntax highlighting"
 
             # Extract the code block content
             code_block_start = reply_body.find("```diff")
@@ -293,15 +271,11 @@ def test_code_block_in_markdown_between_line_numbers(
             assert code_block_end != -1, "Code block should be properly closed"
 
             # Get the content between the code block markers (skip the ```diff part)
-            code_block_content = reply_body[
-                code_block_start + 7 : code_block_end
-            ].strip()
+            code_block_content = reply_body[code_block_start + 7 : code_block_end].strip()
 
             # Verify the code block contains diff markers
             assert (
-                "+" in code_block_content
-                or "-" in code_block_content
-                or " " in code_block_content
+                "+" in code_block_content or "-" in code_block_content or " " in code_block_content
             ), "Code block should contain diff markers (+, -, or space)"
 
             # Verify the code block contains code from the diff

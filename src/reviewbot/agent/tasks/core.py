@@ -35,9 +35,7 @@ class ToolCallerSettings:
     """
 
 
-def tool_caller(
-    agent: Any, messages: List[BaseMessage], settings: ToolCallerSettings
-) -> str:
+def tool_caller(agent: Any, messages: List[BaseMessage], settings: ToolCallerSettings) -> str:
     finished = False
     final_response = None
     max_tool_calls = settings.max_tool_calls
@@ -74,22 +72,16 @@ def tool_caller(
                                     text_parts.append(block.get("text", ""))
                                 elif "text" in block:
                                     text_parts.append(block["text"])
-                        final_response = (
-                            "\n".join(text_parts) if text_parts else str(content)
-                        )
+                        final_response = "\n".join(text_parts) if text_parts else str(content)
                     else:
                         final_response = content
 
-                    console.print(
-                        f"[dim]Got final response: {final_response[:100]}...[/dim]"
-                    )
+                    console.print(f"[dim]Got final response: {final_response[:100]}...[/dim]")
                     finished = True
 
             elif isinstance(latest_message, ToolMessage):
                 total_tool_calls += 1
-                console.print(
-                    f"[dim]Tool call completed ({total_tool_calls} total)[/dim]"
-                )
+                console.print(f"[dim]Tool call completed ({total_tool_calls} total)[/dim]")
                 if max_tool_calls != -1 and total_tool_calls >= max_tool_calls:
                     console.print(
                         f"[yellow]Max tool calls ({max_tool_calls}) reached - forcing final response[/yellow]"
@@ -111,7 +103,9 @@ def tool_caller(
                                 for block in final_response:
                                     if isinstance(block, dict) and block.get("type") == "text":
                                         text_parts.append(block.get("text", ""))
-                                final_response = "\n".join(text_parts) if text_parts else str(final_response)
+                                final_response = (
+                                    "\n".join(text_parts) if text_parts else str(final_response)
+                                )
                         else:
                             final_response = "[]"  # Empty array as fallback
                     except Exception as e:
@@ -128,9 +122,7 @@ def tool_caller(
             final_response = None
 
     if not isinstance(final_response, str):
-        console.print(
-            f"Final response is not a string: {final_response}, returning None"
-        )
+        console.print(f"Final response is not a string: {final_response}, returning None")
         return "None"
     return final_response
 
@@ -216,8 +208,6 @@ def tool_caller_stream(
                 console.print(last_chunk)
                 messages = last_chunk["messages"]
     if not isinstance(final_response, str):
-        console.print(
-            f"Final response is not a string : {final_response}, returning None"
-        )
+        console.print(f"Final response is not a string : {final_response}, returning None")
         return "None"
     return final_response

@@ -154,9 +154,7 @@ class CodebaseVectorStore:
         self.save()
 
     def compile(self, command: str) -> str:
-        return subprocess.run(
-            command, shell=True, capture_output=True, text=True
-        ).stdout
+        return subprocess.run(command, shell=True, capture_output=True, text=True).stdout
 
     def _build_metadata_index(self) -> None:
         self.metadata_index = {}
@@ -205,9 +203,7 @@ class CodebaseVectorStore:
         filter = {}
         if path:
             filter["path"] = path
-        results = self.vector_store.similarity_search_with_score(
-            query, k=top_k, filter=filter
-        )
+        results = self.vector_store.similarity_search_with_score(query, k=top_k, filter=filter)
         out = []
         for doc, score in results:
             out.append(

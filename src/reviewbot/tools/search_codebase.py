@@ -87,9 +87,7 @@ def search_codebase_semantic_search(query: str, path: Optional[str] = None) -> s
 
 
 @tool
-def read_file(
-    path: str, line_start: Optional[int] = None, line_end: Optional[int] = None
-) -> str:
+def read_file(path: str, line_start: Optional[int] = None, line_end: Optional[int] = None) -> str:
     """Read the file at the given path.
 
     Args:

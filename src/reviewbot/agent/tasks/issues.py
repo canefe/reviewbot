@@ -46,9 +46,7 @@ def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) ->
 
             # If this was the last attempt, raise the exception
             if attempt >= max_retries:
-                console.print(
-                    f"[red]All {max_retries} retries failed. Last error: {e}[/red]"
-                )
+                console.print(f"[red]All {max_retries} retries failed. Last error: {e}[/red]")
                 raise
 
             # Calculate delay with exponential backoff
@@ -74,9 +72,7 @@ def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) ->
                 console.print(f"[yellow]Non-retryable error encountered: {e}[/yellow]")
                 raise
 
-            console.print(
-                f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]"
-            )
+            console.print(f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]")
             console.print(f"[yellow]Retrying in {delay:.1f} seconds...[/yellow]")
             time.sleep(delay)
 
@@ -192,9 +188,7 @@ def run_concurrent_reviews(
     """
     diff_file_paths = [diff.new_path for diff in diffs]
 
-    console.print(
-        f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]"
-    )
+    console.print(f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]")
     console.print(f"[dim]Files: {', '.join(diff_file_paths)}[/dim]\n")
 
     all_issues: List[IssueModel] = []
@@ -225,17 +219,13 @@ def run_concurrent_reviews(
         monitor_thread.start()
 
         # Process results with timeout
-        for future in as_completed(
-            future_to_file, timeout=task_timeout * len(diff_file_paths)
-        ):
+        for future in as_completed(future_to_file, timeout=task_timeout * len(diff_file_paths)):
             file_path = future_to_file[future]
             try:
                 # Get result with per-task timeout
                 issues = future.result(timeout=task_timeout)
                 all_issues.extend(issues)
-                console.print(
-                    f"[green]✓[/green] Processed {file_path}: {len(issues)} issues"
-                )
+                console.print(f"[green]✓[/green] Processed {file_path}: {len(issues)} issues")
 
                 # Call the callback if provided, allowing immediate discussion creation
                 if on_file_complete:
@@ -249,9 +239,7 @@ def run_concurrent_reviews(
 
                         traceback.print_exc()
             except TimeoutError:
-                console.print(
-                    f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s"
-                )
+                console.print(f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s")
             except Exception as e:
                 console.print(f"[red]✗[/red] Failed {file_path}: {e}")
                 import traceback
@@ -330,7 +318,9 @@ Use get_diff("{file_path}") to see the changes, then respond with ONLY "true" or
 
         return needs_review
     except Exception as e:
-        console.print(f"[yellow]Quick scan failed for {file_path}, defaulting to deep review: {e}[/yellow]")
+        console.print(
+            f"[yellow]Quick scan failed for {file_path}, defaulting to deep review: {e}[/yellow]"
+        )
         return True  # If scan fails, do deep review to be safe
 
 
@@ -471,9 +461,7 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
 
         console.print(f"[green]Completed review of: {file_path}[/green]")
         console.print(
-            f"Raw response: {raw[:200]}..."
-            if len(str(raw)) > 200
-            else f"Raw response: {raw}"
+            f"Raw response: {raw[:200]}..." if len(str(raw)) > 200 else f"Raw response: {raw}"
         )
 
         # Parse issues from response
@@ -488,9 +476,7 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
                         try:
                             issues.append(IssueModel.model_validate(issue_data))
                         except Exception as e:
-                            console.print(
-                                f"[yellow]Failed to validate issue: {e}[/yellow]"
-                            )
+                            console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
                 elif isinstance(parsed, dict):
                     try:
                         issues.append(IssueModel.model_validate(parsed))
