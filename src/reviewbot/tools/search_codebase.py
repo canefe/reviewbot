@@ -45,9 +45,9 @@ def search_codebase(query: str) -> str:
     ]
 
     result = subprocess.run(
-    cmd,
-    capture_output=True,
-    text=True,
+        cmd,
+        capture_output=True,
+        text=True,
     )
     print(cmd)
     print("================================================")

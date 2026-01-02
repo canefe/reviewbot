@@ -12,5 +12,6 @@ class Context(TypedDict):
 
 store_manager_ctx: ContextVar[Context | None] = ContextVar("store_manager", default=None)
 
+
 def init_ctx() -> None:
     store_manager_ctx.set({"store_manager": None, "issue_store": None})

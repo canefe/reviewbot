@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, ConfigDict
 
 from reviewbot.core.issues.issue import Issue, IssueSeverity
