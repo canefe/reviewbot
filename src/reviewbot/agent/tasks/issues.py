@@ -92,6 +92,7 @@ class IssuesInput:
     context: Context
     settings: ToolCallerSettings
     on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
+    quick_scan_agent: Optional[Agent] = None
 
 
 @task
@@ -103,6 +104,7 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
     context = ctx.context
     settings = ctx.settings
     on_file_complete = ctx.on_file_complete
+    quick_scan_agent = ctx.quick_scan_agent
 
     issue_store = context.get("issue_store")
     if not issue_store:
@@ -124,7 +126,12 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
 
     # Run concurrent reviews - pass the context values and callback
     all_issues = run_concurrent_reviews(
-        agent, diffs, settings, context, on_file_complete=on_file_complete
+        agent,
+        diffs,
+        settings,
+        context,
+        on_file_complete=on_file_complete,
+        quick_scan_agent=quick_scan_agent,
     )
 
     # Convert to domain objects
@@ -166,6 +173,7 @@ def run_concurrent_reviews(
     max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
     on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None,
+    quick_scan_agent: Any | None = None,
 ) -> List[IssueModel]:
     """
     Run concurrent reviews of all diff files with context propagation and monitoring.
@@ -179,6 +187,8 @@ def run_concurrent_reviews(
         task_timeout: Timeout per task in seconds
         on_file_complete: Optional callback function called when each file's review completes.
                          Receives (file_path, issues) as arguments.
+        quick_scan_agent: Optional low-effort agent for quick prerequisite scanning.
+                         If provided, files are scanned first to determine if deep review is needed.
     """
     diff_file_paths = [diff.new_path for diff in diffs]
 
@@ -196,6 +206,7 @@ def run_concurrent_reviews(
             agent=agent,
             settings=settings,
             context=context,
+            quick_scan_agent=quick_scan_agent,
         )
 
         # Submit tasks
@@ -268,11 +279,67 @@ def run_concurrent_reviews(
     return all_issues
 
 
+def quick_scan_file(
+    agent: Any,
+    file_path: str,
+    settings: ToolCallerSettings,
+) -> bool:
+    """
+    Quick scan with low-effort agent to determine if file needs deep review.
+    Returns True if file needs deep review, False otherwise.
+    """
+    messages: List[BaseMessage] = [
+        SystemMessage(
+            content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
+
+Review the diff and decide if this file needs detailed analysis. Return TRUE if ANY of these apply:
+- New code that implements business logic
+- Changes to security-sensitive code (auth, permissions, data validation)
+- Database queries or migrations
+- API endpoint changes
+- Complex algorithms or data structures
+- Error handling changes
+- Configuration changes that affect behavior
+
+Return FALSE if:
+- Only formatting/whitespace changes
+- Simple refactoring (renaming variables/functions)
+- Adding/updating comments or documentation only
+- Import reordering
+- Trivial changes (typo fixes in strings, adding logging)
+
+Output ONLY "true" or "false" (lowercase, no quotes)."""
+        ),
+        HumanMessage(
+            content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
+
+Use get_diff("{file_path}") to see the changes, then respond with ONLY "true" or "false"."""
+        ),
+    ]
+
+    try:
+        console.print(f"[dim]Quick scanning: {file_path}[/dim]")
+        raw = with_retry(tool_caller, settings, agent, messages, settings)
+        result = str(raw).strip().lower()
+
+        needs_review = "true" in result
+        if needs_review:
+            console.print(f"[yellow]✓ Needs deep review: {file_path}[/yellow]")
+        else:
+            console.print(f"[dim]⊘ Skipping deep review: {file_path}[/dim]")
+
+        return needs_review
+    except Exception as e:
+        console.print(f"[yellow]Quick scan failed for {file_path}, defaulting to deep review: {e}[/yellow]")
+        return True  # If scan fails, do deep review to be safe
+
+
 def review_single_file_with_context(
     file_path: str,
     agent: Any,
     settings: ToolCallerSettings,
     context: Context,
+    quick_scan_agent: Any | None = None,
 ) -> List[IssueModel]:
     """
     Wrapper that sets context before reviewing.
@@ -283,6 +350,13 @@ def review_single_file_with_context(
         store_manager_ctx.set(context)
 
         console.print(f"[dim]Context set for thread processing: {file_path}[/dim]")
+
+        # Quick scan first if agent provided
+        if quick_scan_agent:
+            needs_deep_review = quick_scan_file(quick_scan_agent, file_path, settings)
+            if not needs_deep_review:
+                console.print(f"[dim]Skipping deep review for: {file_path}[/dim]")
+                return []
 
         # Now call the actual review function
         return review_single_file(agent, file_path, settings)

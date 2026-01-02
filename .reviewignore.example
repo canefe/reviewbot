@@ -1,0 +1,38 @@
+# .reviewignore - Patterns for files to exclude from code review
+# This file works similar to .gitignore with glob pattern matching
+
+# Dependency lock files (already in global blacklist, but shown as example)
+# go.sum
+# go.mod
+# package-lock.json
+
+# Configuration files you might want to skip
+# *.yaml
+# *.yml
+# *.json
+
+# Test fixtures or mock data
+# test/fixtures/*
+# **/mocks/*
+# **/__snapshots__/*
+
+# Generated code or build artifacts
+# **/*.generated.ts
+# **/*.pb.go
+# dist/*
+# build/*
+
+# Documentation that doesn't need review
+# docs/*
+# *.md
+
+# Specific files you want to exclude
+# legacy/old-code.py
+# vendor/*
+
+# Pattern examples:
+# - Exact filename: config.json
+# - Wildcard: *.min.js
+# - Directory: node_modules/*
+# - Nested: **/test/**/*.txt
+# - Multiple extensions: *.{jpg,png,gif}

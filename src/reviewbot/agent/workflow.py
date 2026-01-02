@@ -2,7 +2,7 @@ import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain.agents import create_agent  # type: ignore
 from langchain.agents.middleware import (  # type: ignore
@@ -28,12 +28,14 @@ from reviewbot.infra.git.repo_tree import tree
 from reviewbot.infra.gitlab.clone import build_clone_url
 from reviewbot.infra.gitlab.diff import FileDiff, fetch_mr_diffs, get_mr_branch
 from reviewbot.infra.gitlab.note import (
+    get_all_discussions,
     post_discussion,
     post_discussion_reply,
     post_merge_request_note,
+    update_discussion_note,
 )
 from reviewbot.infra.issues.in_memory_issue_store import InMemoryIssueStore
-from reviewbot.models.gpt import get_gpt_model
+from reviewbot.models.gpt import get_gpt_model, get_gpt_model_low_effort
 from reviewbot.tools import (
     get_diff,
     read_file,
@@ -92,7 +94,7 @@ GLOBAL_REVIEW_BLACKLIST = [
 ]
 
 
-def parse_reviewignore(repo_path: Path) -> List[str]:
+def parse_reviewignore(repo_path: Path) -> list[str]:
     """
     Parse .reviewignore file from the repository.
 
@@ -106,13 +108,11 @@ def parse_reviewignore(repo_path: Path) -> List[str]:
     patterns = []
 
     if not reviewignore_path.exists():
-        console.print(
-            "[dim].reviewignore file not found, using global blacklist only[/dim]"
-        )
+        console.print("[dim].reviewignore file not found, using global blacklist only[/dim]")
         return patterns
 
     try:
-        with open(reviewignore_path, "r", encoding="utf-8") as f:
+        with open(reviewignore_path, encoding="utf-8") as f:
             for line in f:
                 # Strip whitespace
                 line = line.strip()
@@ -128,7 +128,7 @@ def parse_reviewignore(repo_path: Path) -> List[str]:
     return patterns
 
 
-def should_ignore_file(file_path: str, reviewignore_patterns: List[str]) -> bool:
+def should_ignore_file(file_path: str, reviewignore_patterns: list[str]) -> bool:
     """
     Check if a file should be ignored based on .reviewignore patterns and global blacklist.
 
@@ -161,9 +161,7 @@ def should_ignore_file(file_path: str, reviewignore_patterns: List[str]) -> bool
     return False
 
 
-def filter_diffs(
-    diffs: List[FileDiff], reviewignore_patterns: List[str]
-) -> List[FileDiff]:
+def filter_diffs(diffs: list[FileDiff], reviewignore_patterns: list[str]) -> list[FileDiff]:
     """
     Filter out diffs for files that should be ignored.
 
@@ -188,9 +186,7 @@ def filter_diffs(
             filtered.append(diff)
 
     if ignored_count > 0:
-        console.print(
-            f"[cyan]Filtered out {ignored_count} file(s) based on ignore patterns[/cyan]"
-        )
+        console.print(f"[cyan]Filtered out {ignored_count} file(s) based on ignore patterns[/cyan]")
 
     return filtered
 
@@ -210,7 +206,7 @@ def _extract_code_from_diff(diff_patch: str, line_start: int, line_end: int) -> 
     import re
 
     lines = diff_patch.splitlines(keepends=True)
-    result_lines: List[str] = []
+    result_lines: list[str] = []
     current_new_line = 0
     current_old_line = 0
     in_target_range = False
@@ -229,17 +225,11 @@ def _extract_code_from_diff(diff_patch: str, line_start: int, line_end: int) -> 
             current_old_line = old_start
             # Check if this hunk overlaps with our target range
             new_count = int(match.group(4)) if match.group(4) else 1
-            in_target_range = (
-                new_start <= line_end and (new_start + new_count) >= line_start
-            )
+            in_target_range = new_start <= line_end and (new_start + new_count) >= line_start
             continue
 
         # Skip diff header lines
-        if (
-            line.startswith("diff --git")
-            or line.startswith("---")
-            or line.startswith("+++")
-        ):
+        if line.startswith("diff --git") or line.startswith("---") or line.startswith("+++"):
             continue
 
         # Process diff lines - keep the prefixes to show the actual diff
@@ -318,10 +308,11 @@ def post_review_acknowledgment(
     project_id: str,
     mr_iid: str,
     agent: Agent,
-    diffs: List[FileDiff],
-) -> None:
+    diffs: list[FileDiff],
+) -> tuple[str, str] | None:
     """
     Post a surface-level summary acknowledging the review is starting.
+    Creates a discussion so it can be updated later.
     Only posts if no acknowledgment already exists to prevent duplicates.
 
     Args:
@@ -331,31 +322,39 @@ def post_review_acknowledgment(
         mr_iid: Merge request IID
         agent: The agent to use for generating summary
         diffs: List of file diffs
+
+    Returns:
+        Tuple of (discussion_id, note_id) if created, None if already exists or failed
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from reviewbot.infra.gitlab.note import get_merge_request_notes
-
     # Check if an acknowledgment already exists
     try:
-        notes = get_merge_request_notes(
+        discussions = get_all_discussions(
             api_v4=api_v4,
             token=token,
             project_id=project_id,
             mr_iid=mr_iid,
         )
 
-        # Check if any note contains the acknowledgment marker
+        # Check if any discussion contains the acknowledgment marker
         acknowledgment_marker = "🤖 **Code Review Starting**"
-        for note in notes:
-            body = note.get("body", "")
-            if acknowledgment_marker in body:
-                console.print("[dim]Acknowledgment already exists, skipping[/dim]")
-                return
+        for discussion in discussions:
+            notes = discussion.get("notes", [])
+            for note in notes:
+                body = note.get("body", "")
+                if acknowledgment_marker in body:
+                    console.print(
+                        "[dim]Acknowledgment already exists, returning existing IDs[/dim]"
+                    )
+                    # Return the existing discussion and note IDs
+                    discussion_id = discussion.get("id")
+                    note_id = note.get("id")
+                    if discussion_id and note_id:
+                        return (str(discussion_id), str(note_id))
+                    return None
     except Exception as e:
-        console.print(
-            f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]"
-        )
+        console.print(f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]")
         # Continue anyway - better to post a duplicate than miss it
 
     # Get list of files being reviewed
@@ -392,7 +391,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         summary_settings = ToolCallerSettings(max_tool_calls=0, max_iterations=1)
         summary = tool_caller(agent, messages, summary_settings)
 
-        # Post as a general MR note
+        # Post as a discussion (so we can update it later)
         acknowledgment_body = f"""🤖 **Code Review Starting**
 
 {summary}
@@ -401,7 +400,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
 *Review powered by ReviewBot*
 """
 
-        post_merge_request_note(
+        discussion_id = post_discussion(
             api_v4=api_v4,
             token=token,
             project_id=project_id,
@@ -409,19 +408,194 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
             body=acknowledgment_body,
         )
 
+        # Get the note ID from the discussion
+        # The first note in a discussion is the original note
+        discussions = get_all_discussions(
+            api_v4=api_v4,
+            token=token,
+            project_id=project_id,
+            mr_iid=mr_iid,
+        )
+
+        note_id = None
+        for discussion in discussions:
+            if str(discussion.get("id")) == str(discussion_id):
+                notes = discussion.get("notes", [])
+                if notes:
+                    note_id = str(notes[0].get("id"))
+                    break
+
+        if not note_id:
+            console.print("[yellow]⚠ Created discussion but could not find note ID[/yellow]")
+            return None
+
         console.print("[green]✓ Posted review acknowledgment[/green]")
+        return (str(discussion_id), note_id)
 
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
         # Don't fail the whole review if acknowledgment fails
+        return None
+
+
+def update_review_summary(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    discussion_id: str,
+    note_id: str,
+    issues: list[Issue],
+    diffs: list[FileDiff],
+    agent: Agent,
+) -> None:
+    """
+    Update the acknowledgment note with a summary of the review results.
+    Uses LLM to generate reasoning and summary.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        discussion_id: Discussion ID of the acknowledgment
+        note_id: Note ID to update
+        issues: List of issues found during review
+        diffs: List of file diffs that were reviewed
+        agent: The agent to use for generating summary
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    # Count issues by severity
+    high_count = sum(1 for issue in issues if issue.severity == IssueSeverity.HIGH)
+    medium_count = sum(1 for issue in issues if issue.severity == IssueSeverity.MEDIUM)
+    low_count = sum(1 for issue in issues if issue.severity == IssueSeverity.LOW)
+
+    # Group issues by file
+    issues_by_file: dict[str, list[Issue]] = {}
+    for issue in issues:
+        if issue.file_path not in issues_by_file:
+            issues_by_file[issue.file_path] = []
+        issues_by_file[issue.file_path].append(issue)
+
+    # Build structured statistics
+    total_files = len(diffs)
+    files_with_issues = len(issues_by_file)
+
+    # Prepare issue details for LLM
+    issues_summary = []
+    for issue in issues:
+        issues_summary.append(
+            f"- **{issue.severity.value.upper()}** in `{issue.file_path}` (lines {issue.start_line}-{issue.end_line}): {issue.description}"
+        )
+
+    issues_text = "\n".join(issues_summary) if issues_summary else "No issues found."
+
+    # Generate LLM summary with reasoning
+    try:
+        from reviewbot.agent.tasks.core import ToolCallerSettings, tool_caller
+
+        messages = [
+            SystemMessage(
+                content="""You are a code review assistant. Generate a concise, professional summary of a code review with reasoning.
+
+IMPORTANT:
+- Keep it SHORT (3-5 sentences max)
+- Provide reasoning about the overall code quality
+- Highlight key concerns or positive aspects
+- Be constructive and professional
+- DO NOT use any tools
+- Focus on the big picture, not individual issue details"""
+            ),
+            HumanMessage(
+                content=f"""A code review has been completed with the following results:
+
+**Statistics:**
+- Files reviewed: {total_files}
+- Files with issues: {files_with_issues}
+- Total issues: {len(issues)}
+  - High severity: {high_count}
+  - Medium severity: {medium_count}
+  - Low severity: {low_count}
+
+**Issues found:**
+{issues_text}
+
+Generate a brief summary (3-5 sentences) that:
+1. Provides overall assessment of the code quality
+2. Highlights the most important concerns (if any)
+3. Gives reasoning about the review findings
+4. Is constructive and actionable
+
+If no issues were found, celebrate the good code quality."""
+            ),
+        ]
+
+        summary_settings = ToolCallerSettings(max_tool_calls=0, max_iterations=1)
+        llm_summary = tool_caller(agent, messages, summary_settings)
+
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to generate LLM summary: {e}[/yellow]")
+        llm_summary = "Review completed successfully."
+
+    # Build final summary combining statistics and LLM reasoning
+    summary_parts = [
+        "🤖 **Code Review Complete**\n\n",
+        f"Reviewed **{total_files}** file(s), found **{len(issues)}** issue(s) across **{files_with_issues}** file(s).\n\n",
+        "**Summary:**\n",
+        f"{llm_summary}\n\n",
+    ]
+
+    if issues:
+        summary_parts.append("**Issue Breakdown:**\n")
+        if high_count > 0:
+            summary_parts.append(f"- 🔴 **{high_count}** High severity\n")
+        if medium_count > 0:
+            summary_parts.append(f"- 🟠 **{medium_count}** Medium severity\n")
+        if low_count > 0:
+            summary_parts.append(f"- 🟢 **{low_count}** Low severity\n")
+
+        summary_parts.append("\n**Issues by File:**\n")
+        for file_path, file_issues in sorted(issues_by_file.items()):
+            high = sum(1 for i in file_issues if i.severity == IssueSeverity.HIGH)
+            medium = sum(1 for i in file_issues if i.severity == IssueSeverity.MEDIUM)
+            low = sum(1 for i in file_issues if i.severity == IssueSeverity.LOW)
+            severity_badges = []
+            if high > 0:
+                severity_badges.append(f"🔴 {high}")
+            if medium > 0:
+                severity_badges.append(f"🟠 {medium}")
+            if low > 0:
+                severity_badges.append(f"🟢 {low}")
+            badges = " ".join(severity_badges)
+            summary_parts.append(f"- `{file_path}`: {len(file_issues)} issue(s) {badges}\n")
+    else:
+        summary_parts.append("\n✅ **No issues found!**\n")
+
+    summary_parts.append("\n---\n*Review powered by ReviewBot*")
+
+    summary_body = "".join(summary_parts)
+
+    try:
+        update_discussion_note(
+            api_v4=api_v4,
+            token=token,
+            project_id=project_id,
+            mr_iid=mr_iid,
+            discussion_id=discussion_id,
+            note_id=note_id,
+            body=summary_body,
+        )
+        console.print("[green]✓ Updated review acknowledgment with summary[/green]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to update acknowledgment: {e}[/yellow]")
+        # Don't fail the whole review if update fails
 
 
 def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     api_v4 = config.gitlab_api_v4 + "/api/v4"
     token = config.gitlab_token
-    model = get_gpt_model(
-        config.llm_model_name, config.llm_api_key, config.llm_base_url
-    )
+    model = get_gpt_model(config.llm_model_name, config.llm_api_key, config.llm_base_url)
 
     clone_url = build_clone_url(api_v4, project_id, token)
 
@@ -450,9 +624,7 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     # Parse .reviewignore and filter diffs
     reviewignore_patterns = parse_reviewignore(repo_path)
     filtered_diffs = filter_diffs(diffs, reviewignore_patterns)
-    console.print(
-        f"[cyan]Reviewing {len(filtered_diffs)} out of {len(diffs)} changed files[/cyan]"
-    )
+    console.print(f"[cyan]Reviewing {len(filtered_diffs)} out of {len(diffs)} changed files[/cyan]")
 
     manager = CodebaseStoreManager()
     manager.set_repo_root(repo_path)
@@ -462,9 +634,7 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     manager.get_store()
 
     issue_store = InMemoryIssueStore()
-    token_ctx = store_manager_ctx.set(
-        Context(store_manager=manager, issue_store=issue_store)
-    )
+    token_ctx = store_manager_ctx.set(Context(store_manager=manager, issue_store=issue_store))
 
     context = store_manager_ctx.get()
 
@@ -476,55 +646,72 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
         mr_iid=mr_iid,
     )
 
+    # Create a low-effort agent for simple tasks like acknowledgments and quick scans
+    low_effort_model = get_gpt_model_low_effort(
+        config.llm_model_name, config.llm_api_key, config.llm_base_url
+    )
+    low_effort_agent: Agent = create_agent(
+        model=low_effort_model,
+        tools=[get_diff],  # Only needs get_diff for quick scanning
+    )
+
     # Post acknowledgment that review is starting
-    post_review_acknowledgment(
+    acknowledgment_ids = post_review_acknowledgment(
         api_v4=api_v4,
         token=token,
         project_id=project_id,
         mr_iid=mr_iid,
-        agent=agent,
+        agent=low_effort_agent,
         diffs=filtered_diffs,
     )
 
     try:
         # Define callback to create discussions as each file's review completes
-        def on_file_review_complete(file_path: str, issues: List[Any]) -> None:
+        def on_file_review_complete(file_path: str, issues: list[Any]) -> None:
             """Callback called when a file's review completes."""
             if not issues:
-                console.print(
-                    f"[dim]No issues found in {file_path}, skipping discussion[/dim]"
-                )
+                console.print(f"[dim]No issues found in {file_path}, skipping discussion[/dim]")
                 return
 
             # Convert IssueModel to Issue domain objects
             from reviewbot.core.issues.issue_model import IssueModel
 
-            domain_issues = [
-                issue.to_domain() for issue in issues if isinstance(issue, IssueModel)
-            ]
-            handle_file_issues(
-                file_path, domain_issues, gitlab_config, filtered_diffs, diff_refs
-            )
+            domain_issues = [issue.to_domain() for issue in issues if isinstance(issue, IssueModel)]
+            handle_file_issues(file_path, domain_issues, gitlab_config, filtered_diffs, diff_refs)
 
         # Pass the callback to the agent runner
-        issues: List[Issue] = agent_runner.invoke(  # type: ignore
+        issues: list[Issue] = agent_runner.invoke(  # type: ignore
             AgentRunnerInput(
                 agent=agent,
                 context=context,
                 settings=settings,
                 on_file_complete=on_file_review_complete,
+                quick_scan_agent=low_effort_agent,
             )
         )
 
         console.print(f"[bold cyan]📊 Total issues found: {len(issues)}[/bold cyan]")
 
+        # Update the acknowledgment note with summary
+        if acknowledgment_ids:
+            discussion_id, note_id = acknowledgment_ids
+            update_review_summary(
+                api_v4=api_v4,
+                token=token,
+                project_id=project_id,
+                mr_iid=mr_iid,
+                discussion_id=discussion_id,
+                note_id=note_id,
+                issues=issues,
+                diffs=filtered_diffs,
+                agent=low_effort_agent,
+            )
+
         # Discussions are now created as reviews complete, but we still need to
         # handle any files that might have been processed but had no issues
         # (though the callback already handles this case)
 
-        console.print(
-            "[bold green]🎉 All reviews completed and discussions created![/bold green]"
-        )
+        console.print("[bold green]🎉 All reviews completed and discussions created![/bold green]")
         return "Review completed successfully"
 
     except Exception as e:
@@ -539,12 +726,10 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
 
 def handle_file_issues(
     file_path: str,
-    issues: List[Issue],
+    issues: list[Issue],
     gitlab_config: GitLabConfig,
-    file_diffs: List[FileDiff],  # Add this parameter
-    diff_refs: Dict[
-        str, str
-    ],  # Add this parameter (contains base_sha, head_sha, start_sha)
+    file_diffs: list[FileDiff],  # Add this parameter
+    diff_refs: dict[str, str],  # Add this parameter (contains base_sha, head_sha, start_sha)
 ) -> None:
     """
     Create one discussion per file with the first issue, and reply with subsequent issues.
@@ -559,9 +744,7 @@ def handle_file_issues(
     if not issues:
         return
 
-    console.print(
-        f"[cyan]Creating discussion for {file_path} with {len(issues)} issue(s)[/cyan]"
-    )
+    console.print(f"[cyan]Creating discussion for {file_path} with {len(issues)} issue(s)[/cyan]")
 
     # Get the file diff once
     file_diff = next((fd for fd in file_diffs if fd.new_path == file_path), None)
@@ -730,7 +913,7 @@ def create_position_for_issue(
     start_sha: str,
     old_path: str,
     new_path: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Create a GitLab position object for a specific issue line range.
 
@@ -744,9 +927,7 @@ def create_position_for_issue(
     Returns:
         Position dict for GitLab API, or None if line not found in diff
     """
-    hunk_header_pattern = re.compile(
-        r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
-    )
+    hunk_header_pattern = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
 
     lines = diff_text.splitlines()
     current_old = 0
@@ -834,7 +1015,7 @@ def create_discussion(
     title: str,
     body: str,
     gitlab_config: GitLabConfig,
-    position: Dict[str, Any] | None = None,
+    position: dict[str, Any] | None = None,
 ) -> str:
     """
     Create a discussion with title and body.
@@ -882,5 +1063,31 @@ def reply_to_discussion(
         project_id=gitlab_config.project_id,
         merge_request_id=gitlab_config.mr_iid,
         discussion_id=discussion_id,
+        body=body,
+    )
+
+
+def post_mr_note(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    body: str,
+) -> None:
+    """
+    Post a standalone note (comment) to a merge request without creating a discussion.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        body: Note content
+    """
+    post_merge_request_note(
+        api_v4=api_v4,
+        token=token,
+        project_id=project_id,
+        mr_iid=mr_iid,
         body=body,
     )

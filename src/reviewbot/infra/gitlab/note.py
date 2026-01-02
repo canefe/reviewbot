@@ -236,3 +236,46 @@ def get_merge_request_notes(
     )
     r.raise_for_status()
     return r.json()
+
+
+def update_discussion_note(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    discussion_id: str,
+    note_id: str,
+    body: str,
+    timeout: int = 30,
+) -> None:
+    """
+    Update a note in a discussion.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        discussion_id: Discussion ID
+        note_id: Note ID to update
+        body: New body content for the note
+        timeout: Request timeout
+    """
+    url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions/{discussion_id}/notes/{note_id}"
+
+    r = requests.put(
+        url,
+        headers={"PRIVATE-TOKEN": token},
+        json={"body": body},
+        timeout=timeout,
+    )
+
+    if r.status_code >= 400:
+        console.print(f"[red]Failed to update note: {r.status_code} {r.reason}[/red]")
+        try:
+            error_response = r.json()
+            console.print(f"[red]Error response: {error_response}[/red]")
+        except Exception:
+            console.print(f"[red]Error response text: {r.text}[/red]")
+
+    r.raise_for_status()

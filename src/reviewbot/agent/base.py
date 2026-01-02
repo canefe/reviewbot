@@ -20,6 +20,7 @@ class AgentRunnerInput:
     context: Context
     settings: ToolCallerSettings = field(default_factory=ToolCallerSettings)
     on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
+    quick_scan_agent: Optional[Agent] = None
 
 
 @entrypoint()
@@ -28,6 +29,7 @@ def agent_runner(input: AgentRunnerInput) -> List[Issue]:
     settings = input.settings
     context = input.context
     on_file_complete = input.on_file_complete
+    quick_scan_agent = input.quick_scan_agent
 
     issue_store = context.get("issue_store")
     if not issue_store:
@@ -44,6 +46,7 @@ def agent_runner(input: AgentRunnerInput) -> List[Issue]:
             context=context,
             settings=settings,
             on_file_complete=on_file_complete,
+            quick_scan_agent=quick_scan_agent,
         )
     ).result()
 
