@@ -277,6 +277,17 @@ def quick_scan_file(
     Quick scan with low-effort agent to determine if file needs deep review.
     Returns True if file needs deep review, False otherwise.
     """
+    # Fetch the diff first to include in prompt
+    from reviewbot.tools import get_diff as get_diff_tool
+
+    try:
+        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        # Truncate diff for display if too long
+        display_diff = diff_content[:500] + "..." if len(diff_content) > 500 else diff_content
+    except Exception as e:
+        console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
+        return True  # If can't get diff, do deep review to be safe
+
     messages: list[BaseMessage] = [
         SystemMessage(
             content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
@@ -302,12 +313,20 @@ Output ONLY "true" or "false" (lowercase, no quotes)."""
         HumanMessage(
             content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
 
-Use get_diff("{file_path}") to see the changes, then respond with ONLY "true" or "false"."""
+Here is the diff:
+
+```diff
+{diff_content}
+```
+
+Respond with ONLY "true" or "false" based on the criteria above."""
         ),
     ]
 
     try:
         console.print(f"[dim]Quick scanning: {file_path}[/dim]")
+        console.print(f"[dim]Diff preview:\n{display_diff}[/dim]")
+
         raw = with_retry(tool_caller, settings, agent, messages, settings)
         result = str(raw).strip().lower()
 
