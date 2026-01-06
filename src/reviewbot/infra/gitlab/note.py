@@ -58,9 +58,14 @@ def post_discussion(
     # For file-level discussions without specific lines, don't include position
     data: dict[str, Any] = {"body": body}
     if position:
-        # Only include position if it has required fields (new_line or old_line)
-        # Otherwise GitLab will reject it as incomplete
-        has_line_info = "new_line" in position or "old_line" in position or "line_code" in position
+        # Only include position if it has required fields
+        # Can have: new_line, old_line, line_code (single line) OR line_range (multi-line)
+        has_line_info = (
+            "new_line" in position
+            or "old_line" in position
+            or "line_code" in position
+            or "line_range" in position  # Support multi-line positions
+        )
         if has_line_info:
             data["position"] = position
         else:

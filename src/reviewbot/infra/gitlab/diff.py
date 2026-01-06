@@ -128,10 +128,13 @@ def fetch_mr_diffs(
     mr_data = mr_response.json()
 
     # Get diff_refs for position objects
-    diff_refs = mr_data.get("diff_refs", {})
+    diff_refs = mr_data.get("diff_refs") or {}
     base_sha = diff_refs.get("base_sha")
     head_sha = diff_refs.get("head_sha")
     start_sha = diff_refs.get("start_sha")
+    mr_web_url = mr_data.get("web_url")
+    if mr_web_url and "/-/merge_requests/" in mr_web_url:
+        diff_refs["project_web_url"] = mr_web_url.split("/-/merge_requests/")[0]
 
     # Try the new JSON changes endpoint first
     changes_response = requests.get(changes_url, headers=headers, timeout=timeout)

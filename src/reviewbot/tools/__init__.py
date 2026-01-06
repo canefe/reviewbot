@@ -4,10 +4,12 @@ from .search_codebase import (
     search_codebase,
     search_codebase_semantic_search,
 )
+from .think import think
 
 __all__ = [
     "get_diff",
     "read_file",
     "search_codebase",
     "search_codebase_semantic_search",
+    "think",
 ]

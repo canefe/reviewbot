@@ -18,6 +18,34 @@ from reviewbot.core.issues import Issue, IssueModel
 console = Console()
 
 
+def get_reasoning_context() -> str:
+    """
+    Retrieve stored reasoning history from the current context.
+
+    Returns:
+        Formatted string of previous reasoning, or empty string if none exists.
+    """
+    try:
+        context = store_manager_ctx.get()
+        issue_store = context.get("issue_store")
+
+        if not issue_store or not hasattr(issue_store, "_reasoning_history"):
+            return ""
+
+        reasoning_history = issue_store._reasoning_history
+        if not reasoning_history:
+            return ""
+
+        # Format reasoning history for context
+        formatted = "\n\n**Your Previous Reasoning:**\n"
+        for i, reasoning in enumerate(reasoning_history, 1):
+            formatted += f"{i}. {reasoning}\n"
+
+        return formatted
+    except Exception:
+        return ""
+
+
 def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) -> Any:
     """
     Execute a function with exponential backoff retry logic.
@@ -298,6 +326,7 @@ Review the diff and decide if this file needs detailed analysis. Return TRUE if 
 - Complex algorithms or data structures
 - Error handling changes
 - Configuration changes that affect behavior
+- Use tool 'think' to reason. You must reason at least 10 times before giving an answer
 
 Return FALSE if:
 - Only formatting/whitespace changes
@@ -383,9 +412,47 @@ def review_single_file(
     """
     Review a single diff file and return issues found.
     """
+    # Get any previous reasoning context
+    reasoning_context = get_reasoning_context()
+
+    # Force a reasoning pass to ensure think() is invoked during deep review
+    try:
+        from reviewbot.tools import get_diff as get_diff_tool
+
+        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        think_messages: list[BaseMessage] = [
+            SystemMessage(
+                content=(
+                    "You are a senior code reviewer. You MUST call think() exactly once "
+                    "with 2-5 sentences of reasoning about the provided diff. "
+                    "Do not use any other tools. After calling think(), reply with the "
+                    "single word DONE."
+                )
+            ),
+            HumanMessage(
+                content=f"""Diff for {file_path}:
+
+```diff
+{diff_content}
+```
+""",
+            ),
+        ]
+        think_settings = ToolCallerSettings(max_tool_calls=1, max_iterations=1)
+        tool_caller(agent, think_messages, think_settings)
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to record reasoning for {file_path}: {e}[/yellow]")
+
     messages: list[BaseMessage] = [
         SystemMessage(
             content=f"""You are a senior code reviewer analyzing a specific file change.
+
+REASONING TOOL:
+- You have access to a `think()` tool for recording your internal reasoning
+- Use it to plan your approach, analyze patterns, or reason about potential issues
+- Your reasoning is stored and will be available in subsequent requests
+- This helps maintain context and improves review quality{reasoning_context}
+ - During deep reviews, you MUST call think() before producing your JSON output
 
 Your task: Review ONLY the file '{file_path}' from the merge request diff.
 
@@ -396,36 +463,42 @@ IMPORTANT GUIDELINES:
 - Only report issues with clear negative impact (bugs, security risks, performance problems, logic errors)
 - Avoid reporting issues about code style, formatting, or personal preferences unless they violate critical standards
 - Medium/High severity issues should be reserved for actual bugs, security vulnerabilities, or broken functionality
+- The `description` field MUST include a fenced ```diff block quoting only the relevant added/removed/context lines without (@@ but + - is fine), followed by a short plain-text explanation (1-3 sentences)
 
 CRITICAL - KNOWLEDGE CUTOFF AWARENESS:
-⚠️ Your training data has a cutoff date. The code you're reviewing may use:
+Your training data has a cutoff date. The code you're reviewing may use:
 - Package versions released AFTER your training (e.g., v2, v3 of libraries)
 - Language versions you don't know about (e.g., Go 1.23+, Python 3.13+)
 - Import paths that have changed since your training
 - APIs that have been updated
 
 DO NOT FLAG as issues:
-❌ Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
-❌ Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
-❌ Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
-❌ Language features you don't recognize (they might be new)
-❌ API methods you don't know (they might have been added)
+Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
+Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
+Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
+Language features you don't recognize (they might be new)
+API methods you don't know (they might have been added)
 
 ONLY flag version/import issues if:
-✅ There's an obvious typo (e.g., "monggo" instead of "mongo")
-✅ The code itself shows an error (e.g., import fails in the diff)
-✅ There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
+There's an obvious typo (e.g., "monggo" instead of "mongo")
+The code itself shows an error (e.g., import fails in the diff)
+There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
 
 When in doubt about versions/imports: ASSUME THE DEVELOPER IS CORRECT and skip it.
 
 SUGGESTIONS:
-- When the fix is OBVIOUS and simple, include a "suggestion" field with the corrected code
-- The suggestion should contain ONLY the fixed code (not diff markers like +/-)
-- Only include suggestions for simple fixes (typos, obvious bugs, missing fields, etc.)
-- Do NOT include suggestions for complex refactorings or architectural changes
-- DO NOT suggest version/import changes unless there's an obvious typo
-- Format: just the corrected code, no explanations
-
+- When a fix is simple, provide a "suggestion" field.
+- **GitLab Syntax Requirement**: You must format the suggestion using relative line offsets based on your `start_line` and `end_line`.
+- **The Formula**:
+  1. Calculate the offset: `L = end_line - start_line`.
+  2. The header MUST be: ```suggestion:-L+0
+- **Example**: If `start_line` is 7 and `end_line` is 9, the offset `L` is 2. The header is ```suggestion:-2+0.
+- **Content**: The suggestion must include the full corrected code for every line from `start_line` to `end_line`.
+- **Indentation**: You MUST preserve the exact leading whitespace of the original code.
+- Format:
+```suggestion:-L+0
+[CORRECTED CODE BLOCK]
+```
 Output format: JSON array of issue objects following this schema:
 {IssueModel.model_json_schema()}
 
