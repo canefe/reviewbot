@@ -282,8 +282,6 @@ def quick_scan_file(
 
     try:
         diff_content = get_diff_tool.invoke({"file_path": file_path})
-        # Truncate diff for display if too long
-        display_diff = diff_content[:500] + "..." if len(diff_content) > 500 else diff_content
     except Exception as e:
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
@@ -325,7 +323,6 @@ Respond with ONLY "true" or "false" based on the criteria above."""
 
     try:
         console.print(f"[dim]Quick scanning: {file_path}[/dim]")
-        console.print(f"[dim]Diff preview:\n{display_diff}[/dim]")
 
         raw = with_retry(tool_caller, settings, agent, messages, settings)
         result = str(raw).strip().lower()

@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from langchain.agents import create_agent  # type: ignore
 from langchain.agents.middleware import (  # type: ignore
@@ -337,22 +338,44 @@ def post_review_acknowledgment(
             mr_iid=mr_iid,
         )
 
-        # Check if any discussion contains the acknowledgment marker
-        acknowledgment_marker = "🤖 **Code Review Starting**"
+        # Only reuse "Starting" acknowledgments (in-progress reviews)
+        # Don't reuse "Complete" acknowledgments - create new ones for new review runs
+        starting_marker = (
+            '<img src="https://img.shields.io/badge/Code_Review-Starting-blue?style=flat-square" />'
+        )
+
+        # Find ALL "Starting" acknowledgments, then pick the most recent one
+        found_acknowledgments = []
         for discussion in discussions:
             notes = discussion.get("notes", [])
             for note in notes:
                 body = note.get("body", "")
-                if acknowledgment_marker in body:
-                    console.print(
-                        "[dim]Acknowledgment already exists, returning existing IDs[/dim]"
-                    )
-                    # Return the existing discussion and note IDs
+                # Only check for "Starting" marker - this means review is in progress
+                if starting_marker in body:
                     discussion_id = discussion.get("id")
                     note_id = note.get("id")
+                    created_at = note.get("created_at", "")
                     if discussion_id and note_id:
-                        return (str(discussion_id), str(note_id))
-                    return None
+                        found_acknowledgments.append(
+                            {
+                                "discussion_id": str(discussion_id),
+                                "note_id": str(note_id),
+                                "created_at": created_at,
+                            }
+                        )
+
+        # If we found any in-progress acknowledgments, use the most recent one
+        if found_acknowledgments:
+            # Sort by created_at timestamp (most recent first)
+            found_acknowledgments.sort(key=lambda x: x["created_at"], reverse=True)
+            most_recent = found_acknowledgments[0]
+            console.print(
+                f"[dim]Found {len(found_acknowledgments)} in-progress review(s), reusing most recent[/dim]"
+            )
+            return (most_recent["discussion_id"], most_recent["note_id"])
+
+        # No in-progress reviews found - will create a new acknowledgment
+        console.print("[dim]No in-progress reviews found, will create new acknowledgment[/dim]")
     except Exception as e:
         console.print(f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]")
         # Continue anyway - better to post a duplicate than miss it
@@ -392,7 +415,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         summary = tool_caller(agent, messages, summary_settings)
 
         # Post as a discussion (so we can update it later)
-        acknowledgment_body = f"""🤖 **Code Review Starting**
+        acknowledgment_body = f"""<img src="https://img.shields.io/badge/Code_Review-Starting-blue?style=flat-square" />
 
 {summary}
 
@@ -400,7 +423,8 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
 *Review powered by ReviewBot*
 """
 
-        discussion_id = post_discussion(
+        # post_discussion now returns both discussion_id and note_id
+        discussion_id, note_id = post_discussion(
             api_v4=api_v4,
             token=token,
             project_id=project_id,
@@ -408,29 +432,14 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
             body=acknowledgment_body,
         )
 
-        # Get the note ID from the discussion
-        # The first note in a discussion is the original note
-        discussions = get_all_discussions(
-            api_v4=api_v4,
-            token=token,
-            project_id=project_id,
-            mr_iid=mr_iid,
-        )
-
-        note_id = None
-        for discussion in discussions:
-            if str(discussion.get("id")) == str(discussion_id):
-                notes = discussion.get("notes", [])
-                if notes:
-                    note_id = str(notes[0].get("id"))
-                    break
-
         if not note_id:
-            console.print("[yellow]⚠ Created discussion but could not find note ID[/yellow]")
+            console.print("[yellow]⚠ Discussion created but no note ID returned[/yellow]")
             return None
 
-        console.print("[green]✓ Posted review acknowledgment[/green]")
-        return (str(discussion_id), note_id)
+        console.print(
+            f"[green]✓ Posted review acknowledgment (discussion: {discussion_id}, note: {note_id})[/green]"
+        )
+        return (str(discussion_id), str(note_id))
 
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
@@ -540,42 +549,64 @@ If no issues were found, celebrate the good code quality."""
 
     # Build final summary combining statistics and LLM reasoning
     summary_parts = [
-        "🤖 **Code Review Complete**\n\n",
+        '<img src="https://img.shields.io/badge/Code_Review-Complete-green?style=flat-square" />\n\n',
         f"Reviewed **{total_files}** file(s), found **{len(issues)}** issue(s) across **{files_with_issues}** file(s).\n\n",
-        "**Summary:**\n",
+        "**Summary**\n\n",
         f"{llm_summary}\n\n",
     ]
 
     if issues:
-        summary_parts.append("**Issue Breakdown:**\n")
+        summary_parts.append("**Issue Breakdown**\n\n")
         if high_count > 0:
-            summary_parts.append(f"- 🔴 **{high_count}** High severity\n")
+            summary_parts.append(
+                f'<img src="https://img.shields.io/badge/High-{high_count}-red?style=flat-square" /> \n'
+            )
         if medium_count > 0:
-            summary_parts.append(f"- 🟠 **{medium_count}** Medium severity\n")
+            summary_parts.append(
+                f'<img src="https://img.shields.io/badge/Medium-{medium_count}-orange?style=flat-square" /> \n'
+            )
         if low_count > 0:
-            summary_parts.append(f"- 🟢 **{low_count}** Low severity\n")
+            summary_parts.append(
+                f'<img src="https://img.shields.io/badge/Low-{low_count}-green?style=flat-square" /> \n'
+            )
 
-        summary_parts.append("\n**Issues by File:**\n")
+        summary_parts.append("\n<br>\n<br>\n\n**Issues by File**\n\n")
         for file_path, file_issues in sorted(issues_by_file.items()):
             high = sum(1 for i in file_issues if i.severity == IssueSeverity.HIGH)
             medium = sum(1 for i in file_issues if i.severity == IssueSeverity.MEDIUM)
             low = sum(1 for i in file_issues if i.severity == IssueSeverity.LOW)
-            severity_badges = []
+
+            # File name and issue count
+            summary_parts.append(f"`{file_path}`: {len(file_issues)} issue(s) \n\n")
+
+            # Badges on separate lines
             if high > 0:
-                severity_badges.append(f"🔴 {high}")
+                summary_parts.append(
+                    f'<img src="https://img.shields.io/badge/High-{high}-red?style=flat-square" />\n'
+                )
             if medium > 0:
-                severity_badges.append(f"🟠 {medium}")
+                summary_parts.append(
+                    f'<img src="https://img.shields.io/badge/Medium-{medium}-orange?style=flat-square" />\n'
+                )
             if low > 0:
-                severity_badges.append(f"🟢 {low}")
-            badges = " ".join(severity_badges)
-            summary_parts.append(f"- `{file_path}`: {len(file_issues)} issue(s) {badges}\n")
+                summary_parts.append(
+                    f'<img src="https://img.shields.io/badge/Low-{low}-green?style=flat-square" />\n'
+                )
+
+            # Spacing between files
+            summary_parts.append("\n<br>\n<br>\n\n")
     else:
-        summary_parts.append("\n✅ **No issues found!**\n")
+        summary_parts.append(
+            '\n<img src="https://img.shields.io/badge/No_Issues-Found-brightgreen?style=flat-square" /> **No issues found!**\n'
+        )
 
     summary_parts.append("\n---\n*Review powered by ReviewBot*")
 
     summary_body = "".join(summary_parts)
 
+    console.print(
+        f"[dim]Updating discussion {discussion_id}, note {note_id} with review summary...[/dim]"
+    )
     try:
         update_discussion_note(
             api_v4=api_v4,
@@ -589,6 +620,9 @@ If no issues were found, celebrate the good code quality."""
         console.print("[green]✓ Updated review acknowledgment with summary[/green]")
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to update acknowledgment: {e}[/yellow]")
+        import traceback
+
+        traceback.print_exc()
         # Don't fail the whole review if update fails
 
 
@@ -656,6 +690,7 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
     )
 
     # Post acknowledgment that review is starting
+    console.print("[dim]Posting review acknowledgment...[/dim]")
     acknowledgment_ids = post_review_acknowledgment(
         api_v4=api_v4,
         token=token,
@@ -664,6 +699,12 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
         agent=low_effort_agent,
         diffs=filtered_diffs,
     )
+    if acknowledgment_ids:
+        console.print(
+            f"[dim]Acknowledgment created: discussion={acknowledgment_ids[0]}, note={acknowledgment_ids[1]}[/dim]"
+        )
+    else:
+        console.print("[yellow]⚠ Failed to create acknowledgment (returned None)[/yellow]")
 
     try:
         # Define callback to create discussions as each file's review completes
@@ -693,8 +734,12 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
         console.print(f"[bold cyan]📊 Total issues found: {len(issues)}[/bold cyan]")
 
         # Update the acknowledgment note with summary
+        console.print(f"[dim]Checking acknowledgment_ids: {acknowledgment_ids}[/dim]")
         if acknowledgment_ids:
             discussion_id, note_id = acknowledgment_ids
+            console.print(
+                f"[dim]Calling update_review_summary for discussion {discussion_id}, note {note_id}...[/dim]"
+            )
             update_review_summary(
                 api_v4=api_v4,
                 token=token,
@@ -705,6 +750,11 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
                 issues=issues,
                 diffs=filtered_diffs,
                 agent=low_effort_agent,
+            )
+            console.print("[dim]update_review_summary completed[/dim]")
+        else:
+            console.print(
+                "[yellow]⚠ No acknowledgment to update (initial acknowledgment may have failed)[/yellow]"
             )
 
         # Discussions are now created as reviews complete, but we still need to
@@ -754,9 +804,9 @@ def handle_file_issues(
 
     # Severity, Color pairs
     severity_color_pairs = {
-        IssueSeverity.HIGH: "red",
-        IssueSeverity.MEDIUM: "orange",
-        IssueSeverity.LOW: "green",
+        IssueSeverity.HIGH: "#d73a49",  # red
+        IssueSeverity.MEDIUM: "#fbca04",  # yellow/orange
+        IssueSeverity.LOW: "#28a745",  # green
     }
 
     discussion_id = None
@@ -765,8 +815,10 @@ def handle_file_issues(
     first_issue = issues[0]
     discussion_title = ""
 
+    color = severity_color_pairs[first_issue.severity].strip("#")
+
     # Build the discussion body with optional suggestion
-    discussion_body = f"""<img src="https://badgen.net/badge/issue/{first_issue.severity.value.upper()}/{severity_color_pairs[first_issue.severity]}" />
+    discussion_body = f"""<img src="https://img.shields.io/badge/{first_issue.severity.value.upper()}-{color}?style=flat-square" />
 
 {first_issue.description}
 """
@@ -862,8 +914,11 @@ def handle_file_issues(
                 issue.end_line,
             )
 
+        label = issue.severity.value.upper()
+        color = severity_color_pairs[issue.severity]
+
         # Format the reply with a diff block and optional suggestion
-        reply_body = f"""<img src="https://badgen.net/badge/issue/{issue.severity.value.upper()}/{severity_color_pairs[issue.severity]}" />
+        reply_body = f"""<img src="https://img.shields.io/badge/{quote(label)}-%23{color.lstrip("#")}?style=flat-square" />" />
 
 {issue.description}
 """
@@ -902,6 +957,32 @@ def handle_file_issues(
             import traceback
 
             traceback.print_exc()
+
+
+def _generate_line_code(file_path: str, old_line: int | None, new_line: int | None) -> str:
+    """
+    Generate a line_code string for GitLab position API.
+
+    Format: <filename_sha>_<old_line>_<new_line>
+
+    Args:
+        file_path: Path to the file
+        old_line: Line number in old file (or None)
+        new_line: Line number in new file (or None)
+
+    Returns:
+        Line code string
+    """
+    import hashlib
+
+    # Generate SHA1 hash of the file path
+    filename_sha = hashlib.sha1(file_path.encode()).hexdigest()
+
+    # Format: sha_old_new, using empty string for None values
+    old_str = str(old_line) if old_line is not None else ""
+    new_str = str(new_line) if new_line is not None else ""
+
+    return f"{filename_sha}_{old_str}_{new_str}"
 
 
 def create_position_for_issue(
@@ -970,26 +1051,28 @@ def create_position_for_issue(
             current_old += 1
             current_new += 1
 
-    # Choose the best line to anchor the discussion:
-    # 1. Prefer the first added line (issues are usually about new code)
-    # 2. Fall back to middle context line
-    # 3. Finally use deleted line or start line
-    found_old_line = None
-    found_new_line = None
+    # Determine start and end lines for the position
+    # Priority: added lines > context lines > deleted lines
+    start_old_line = None
+    start_new_line = None
+    end_old_line = None
+    end_new_line = None
 
     if added_lines:
-        # Use the first added line in the range
-        found_old_line, found_new_line = added_lines[0]
+        # Use the first and last added lines in the range
+        start_old_line, start_new_line = added_lines[0]
+        end_old_line, end_new_line = added_lines[-1]
     elif context_lines:
-        # Use the middle context line
-        mid_idx = len(context_lines) // 2
-        found_old_line, found_new_line = context_lines[mid_idx]
+        # Use the first and last context lines
+        start_old_line, start_new_line = context_lines[0]
+        end_old_line, end_new_line = context_lines[-1]
     elif deleted_lines:
-        # Use the first deleted line
-        found_old_line, found_new_line = deleted_lines[0]
+        # Use the first and last deleted lines
+        start_old_line, start_new_line = deleted_lines[0]
+        end_old_line, end_new_line = deleted_lines[-1]
 
     # If we didn't find any line in the diff, return None
-    if found_old_line is None and found_new_line is None:
+    if start_old_line is None and start_new_line is None:
         return None
 
     # Create position object
@@ -1002,11 +1085,37 @@ def create_position_for_issue(
         "position_type": "text",
     }
 
-    if found_new_line is not None:
-        position["new_line"] = found_new_line
+    # For single-line issues, use the simple format
+    if issue_line_start == issue_line_end:
+        if start_new_line is not None:
+            position["new_line"] = start_new_line
+        if start_old_line is not None:
+            position["old_line"] = start_old_line
+    else:
+        # For multi-line issues, use line_range
+        # Determine the line type (new for added lines, old for deleted lines)
+        line_type = "new" if start_new_line is not None else "old"
 
-    if found_old_line is not None:
-        position["old_line"] = found_old_line
+        position["line_range"] = {
+            "start": {
+                "line_code": _generate_line_code(new_path, start_old_line, start_new_line),
+                "type": line_type,
+            },
+            "end": {
+                "line_code": _generate_line_code(new_path, end_old_line, end_new_line),
+                "type": line_type,
+            },
+        }
+
+        # Add line numbers to start and end
+        if start_old_line is not None:
+            position["line_range"]["start"]["old_line"] = start_old_line
+        if start_new_line is not None:
+            position["line_range"]["start"]["new_line"] = start_new_line
+        if end_old_line is not None:
+            position["line_range"]["end"]["old_line"] = end_old_line
+        if end_new_line is not None:
+            position["line_range"]["end"]["new_line"] = end_new_line
 
     return position
 
@@ -1032,7 +1141,8 @@ def create_discussion(
     # GitLab discussions don't have separate titles in the API,
     # so we include the title in the body with markdown formatting
 
-    discussion_id = post_discussion(
+    # post_discussion returns (discussion_id, note_id), we only need discussion_id
+    discussion_id, _ = post_discussion(
         api_v4=gitlab_config.api_v4,
         token=gitlab_config.token,
         project_id=gitlab_config.project_id,

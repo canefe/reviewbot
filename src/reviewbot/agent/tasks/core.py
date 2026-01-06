@@ -76,7 +76,7 @@ def tool_caller(agent: Any, messages: list[BaseMessage], settings: ToolCallerSet
                     else:
                         final_response = content
 
-                    console.print(f"[dim]Got final response: {final_response[:100]}...[/dim]")
+                    console.print(f"[dim]Got final response: \n{final_response}...[/dim]")
                     finished = True
 
             elif isinstance(latest_message, ToolMessage):
