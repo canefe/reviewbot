@@ -14,6 +14,7 @@ def load_env() -> Config:
     gitlab_api_v4 = os.getenv("GITLAB_API_V4_URL")
     gitlab_token = os.getenv("GITLAB_BOT_TOKEN")
     gemini_project_id = os.getenv("GEMINI_PROJECT_ID")
+    create_threads_raw = os.getenv("REVIEWBOT_CREATE_THREADS", "true")
     if (
         not llm_api_key
         or not llm_base_url
@@ -25,6 +26,7 @@ def load_env() -> Config:
         raise ValueError(
             "LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, GITLAB_API_V4_URL, GITLAB_BOT_TOKEN, and GEMINI_PROJECT_ID must be set"
         )
+    create_threads = create_threads_raw.strip().lower() not in {"0", "false", "no", "off"}
     return Config(
         llm_api_key=SecretStr(llm_api_key),
         llm_base_url=llm_base_url,
@@ -32,4 +34,5 @@ def load_env() -> Config:
         gitlab_api_v4=gitlab_api_v4,
         gitlab_token=gitlab_token,
         gemini_project_id=gemini_project_id,
+        create_threads=create_threads,
     )

@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import List
 from uuid import UUID, uuid4
 
 from reviewbot.core.issues import Issue
@@ -10,5 +9,5 @@ class Review:
     id: UUID = field(default_factory=uuid4)
     repo: str = ""
     commit: str = ""
-    issues: List[Issue] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
     summary: str = ""

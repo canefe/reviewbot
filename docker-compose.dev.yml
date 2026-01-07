@@ -1,0 +1,41 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: gitlab
+    hostname: gitlab.local
+    restart: always
+    ports:
+      - "8081:80"
+      - "8443:443"
+      - "2222:22"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab.reviewbot.orb.local:8081'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+
+  reviewbot:
+    build: .
+    container_name: reviewbot
+    ports:
+      - "8122:8122"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./logs:/logs
+    command: >
+      sh -c "uv run uvicorn api:app
+      --host 0.0.0.0
+      --port 8122
+      --reload
+      2>&1 | tee /logs/stdout.log"
+    restart: unless-stopped
+
+volumes:
+  gitlab_config:
+  gitlab_logs:
+  gitlab_data:

@@ -1,9 +1,10 @@
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, List, Optional
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.func import task
@@ -15,6 +16,34 @@ from reviewbot.core.agent import Agent
 from reviewbot.core.issues import Issue, IssueModel
 
 console = Console()
+
+
+def get_reasoning_context() -> str:
+    """
+    Retrieve stored reasoning history from the current context.
+
+    Returns:
+        Formatted string of previous reasoning, or empty string if none exists.
+    """
+    try:
+        context = store_manager_ctx.get()
+        issue_store = context.get("issue_store")
+
+        if not issue_store or not hasattr(issue_store, "_reasoning_history"):
+            return ""
+
+        reasoning_history = issue_store._reasoning_history
+        if not reasoning_history:
+            return ""
+
+        # Format reasoning history for context
+        formatted = "\n\n**Your Previous Reasoning:**\n"
+        for i, reasoning in enumerate(reasoning_history, 1):
+            formatted += f"{i}. {reasoning}\n"
+
+        return formatted
+    except Exception:
+        return ""
 
 
 def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) -> Any:
@@ -46,9 +75,7 @@ def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) ->
 
             # If this was the last attempt, raise the exception
             if attempt >= max_retries:
-                console.print(
-                    f"[red]All {max_retries} retries failed. Last error: {e}[/red]"
-                )
+                console.print(f"[red]All {max_retries} retries failed. Last error: {e}[/red]")
                 raise
 
             # Calculate delay with exponential backoff
@@ -74,9 +101,7 @@ def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) ->
                 console.print(f"[yellow]Non-retryable error encountered: {e}[/yellow]")
                 raise
 
-            console.print(
-                f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]"
-            )
+            console.print(f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]")
             console.print(f"[yellow]Retrying in {delay:.1f} seconds...[/yellow]")
             time.sleep(delay)
 
@@ -91,11 +116,12 @@ class IssuesInput:
     agent: Agent
     context: Context
     settings: ToolCallerSettings
-    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
+    quick_scan_agent: Agent | None = None
 
 
 @task
-def identify_issues(ctx: IssuesInput) -> List[Issue]:
+def identify_issues(ctx: IssuesInput) -> list[Issue]:
     """
     Identify the issues in the codebase using concurrent agents per file.
     """
@@ -103,6 +129,7 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
     context = ctx.context
     settings = ctx.settings
     on_file_complete = ctx.on_file_complete
+    quick_scan_agent = ctx.quick_scan_agent
 
     issue_store = context.get("issue_store")
     if not issue_store:
@@ -124,7 +151,12 @@ def identify_issues(ctx: IssuesInput) -> List[Issue]:
 
     # Run concurrent reviews - pass the context values and callback
     all_issues = run_concurrent_reviews(
-        agent, diffs, settings, context, on_file_complete=on_file_complete
+        agent,
+        diffs,
+        settings,
+        context,
+        on_file_complete=on_file_complete,
+        quick_scan_agent=quick_scan_agent,
     )
 
     # Convert to domain objects
@@ -160,13 +192,14 @@ def monitor_progress(
 
 def run_concurrent_reviews(
     agent: Any,
-    diffs: List[Any],
+    diffs: list[Any],
     settings: ToolCallerSettings,
     context: Context,
     max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
-    on_file_complete: Optional[Callable[[str, List[IssueModel]], None]] = None,
-) -> List[IssueModel]:
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
+    quick_scan_agent: Any | None = None,
+) -> list[IssueModel]:
     """
     Run concurrent reviews of all diff files with context propagation and monitoring.
 
@@ -179,15 +212,15 @@ def run_concurrent_reviews(
         task_timeout: Timeout per task in seconds
         on_file_complete: Optional callback function called when each file's review completes.
                          Receives (file_path, issues) as arguments.
+        quick_scan_agent: Optional low-effort agent for quick prerequisite scanning.
+                         If provided, files are scanned first to determine if deep review is needed.
     """
     diff_file_paths = [diff.new_path for diff in diffs]
 
-    console.print(
-        f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]"
-    )
+    console.print(f"[bold]Starting concurrent review of {len(diff_file_paths)} files[/bold]")
     console.print(f"[dim]Files: {', '.join(diff_file_paths)}[/dim]\n")
 
-    all_issues: List[IssueModel] = []
+    all_issues: list[IssueModel] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Create a partial function with context baked in
@@ -196,6 +229,7 @@ def run_concurrent_reviews(
             agent=agent,
             settings=settings,
             context=context,
+            quick_scan_agent=quick_scan_agent,
         )
 
         # Submit tasks
@@ -214,17 +248,13 @@ def run_concurrent_reviews(
         monitor_thread.start()
 
         # Process results with timeout
-        for future in as_completed(
-            future_to_file, timeout=task_timeout * len(diff_file_paths)
-        ):
+        for future in as_completed(future_to_file, timeout=task_timeout * len(diff_file_paths)):
             file_path = future_to_file[future]
             try:
                 # Get result with per-task timeout
                 issues = future.result(timeout=task_timeout)
                 all_issues.extend(issues)
-                console.print(
-                    f"[green]✓[/green] Processed {file_path}: {len(issues)} issues"
-                )
+                console.print(f"[green]✓[/green] Processed {file_path}: {len(issues)} issues")
 
                 # Call the callback if provided, allowing immediate discussion creation
                 if on_file_complete:
@@ -238,9 +268,7 @@ def run_concurrent_reviews(
 
                         traceback.print_exc()
             except TimeoutError:
-                console.print(
-                    f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s"
-                )
+                console.print(f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s")
             except Exception as e:
                 console.print(f"[red]✗[/red] Failed {file_path}: {e}")
                 import traceback
@@ -268,12 +296,87 @@ def run_concurrent_reviews(
     return all_issues
 
 
+def quick_scan_file(
+    agent: Any,
+    file_path: str,
+    settings: ToolCallerSettings,
+) -> bool:
+    """
+    Quick scan with low-effort agent to determine if file needs deep review.
+    Returns True if file needs deep review, False otherwise.
+    """
+    # Fetch the diff first to include in prompt
+    from reviewbot.tools import get_diff as get_diff_tool
+
+    try:
+        diff_content = get_diff_tool.invoke({"file_path": file_path})
+    except Exception as e:
+        console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
+        return True  # If can't get diff, do deep review to be safe
+
+    messages: list[BaseMessage] = [
+        SystemMessage(
+            content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
+
+Review the diff and decide if this file needs detailed analysis. Return TRUE if ANY of these apply:
+- New code that implements business logic
+- Changes to security-sensitive code (auth, permissions, data validation)
+- Database queries or migrations
+- API endpoint changes
+- Complex algorithms or data structures
+- Error handling changes
+- Configuration changes that affect behavior
+- Use tool 'think' to reason. You must reason at least 10 times before giving an answer
+
+Return FALSE if:
+- Only formatting/whitespace changes
+- Simple refactoring (renaming variables/functions)
+- Adding/updating comments or documentation only
+- Import reordering
+- Trivial changes (typo fixes in strings, adding logging)
+
+Output ONLY "true" or "false" (lowercase, no quotes)."""
+        ),
+        HumanMessage(
+            content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
+
+Here is the diff:
+
+```diff
+{diff_content}
+```
+
+Respond with ONLY "true" or "false" based on the criteria above."""
+        ),
+    ]
+
+    try:
+        console.print(f"[dim]Quick scanning: {file_path}[/dim]")
+
+        raw = with_retry(tool_caller, settings, agent, messages, settings)
+        result = str(raw).strip().lower()
+
+        needs_review = "true" in result
+        if needs_review:
+            console.print(f"[yellow]✓ Needs deep review: {file_path}[/yellow]")
+        else:
+            console.print(f"[dim]⊘ Skipping deep review: {file_path}[/dim]")
+
+        return needs_review
+    except Exception as e:
+        console.print(
+            f"[yellow]Quick scan failed for {file_path}, defaulting to deep review: {e}[/yellow]"
+        )
+        return True  # If scan fails, do deep review to be safe
+
+
 def review_single_file_with_context(
     file_path: str,
     agent: Any,
     settings: ToolCallerSettings,
     context: Context,
-) -> List[IssueModel]:
+    quick_scan_agent: Any | None = None,
+) -> list[IssueModel]:
     """
     Wrapper that sets context before reviewing.
     This runs in each worker thread.
@@ -283,6 +386,13 @@ def review_single_file_with_context(
         store_manager_ctx.set(context)
 
         console.print(f"[dim]Context set for thread processing: {file_path}[/dim]")
+
+        # Quick scan first if agent provided
+        if quick_scan_agent:
+            needs_deep_review = quick_scan_file(quick_scan_agent, file_path, settings)
+            if not needs_deep_review:
+                console.print(f"[dim]Skipping deep review for: {file_path}[/dim]")
+                return []
 
         # Now call the actual review function
         return review_single_file(agent, file_path, settings)
@@ -298,13 +408,51 @@ def review_single_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
-) -> List[IssueModel]:
+) -> list[IssueModel]:
     """
     Review a single diff file and return issues found.
     """
-    messages: List[BaseMessage] = [
+    # Get any previous reasoning context
+    reasoning_context = get_reasoning_context()
+
+    # Force a reasoning pass to ensure think() is invoked during deep review
+    try:
+        from reviewbot.tools import get_diff as get_diff_tool
+
+        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        think_messages: list[BaseMessage] = [
+            SystemMessage(
+                content=(
+                    "You are a senior code reviewer. You MUST call think() exactly once "
+                    "with 2-5 sentences of reasoning about the provided diff. "
+                    "Do not use any other tools. After calling think(), reply with the "
+                    "single word DONE."
+                )
+            ),
+            HumanMessage(
+                content=f"""Diff for {file_path}:
+
+```diff
+{diff_content}
+```
+""",
+            ),
+        ]
+        think_settings = ToolCallerSettings(max_tool_calls=1, max_iterations=1)
+        tool_caller(agent, think_messages, think_settings)
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to record reasoning for {file_path}: {e}[/yellow]")
+
+    messages: list[BaseMessage] = [
         SystemMessage(
             content=f"""You are a senior code reviewer analyzing a specific file change.
+
+REASONING TOOL:
+- You have access to a `think()` tool for recording your internal reasoning
+- Use it to plan your approach, analyze patterns, or reason about potential issues
+- Your reasoning is stored and will be available in subsequent requests
+- This helps maintain context and improves review quality{reasoning_context}
+ - During deep reviews, you MUST call think() before producing your JSON output
 
 Your task: Review ONLY the file '{file_path}' from the merge request diff.
 
@@ -315,36 +463,42 @@ IMPORTANT GUIDELINES:
 - Only report issues with clear negative impact (bugs, security risks, performance problems, logic errors)
 - Avoid reporting issues about code style, formatting, or personal preferences unless they violate critical standards
 - Medium/High severity issues should be reserved for actual bugs, security vulnerabilities, or broken functionality
+- The `description` field MUST include a fenced ```diff block quoting only the relevant added/removed/context lines without (@@ but + - is fine), followed by a short plain-text explanation (1-3 sentences)
 
 CRITICAL - KNOWLEDGE CUTOFF AWARENESS:
-⚠️ Your training data has a cutoff date. The code you're reviewing may use:
+Your training data has a cutoff date. The code you're reviewing may use:
 - Package versions released AFTER your training (e.g., v2, v3 of libraries)
 - Language versions you don't know about (e.g., Go 1.23+, Python 3.13+)
 - Import paths that have changed since your training
 - APIs that have been updated
 
 DO NOT FLAG as issues:
-❌ Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
-❌ Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
-❌ Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
-❌ Language features you don't recognize (they might be new)
-❌ API methods you don't know (they might have been added)
+Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
+Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
+Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
+Language features you don't recognize (they might be new)
+API methods you don't know (they might have been added)
 
 ONLY flag version/import issues if:
-✅ There's an obvious typo (e.g., "monggo" instead of "mongo")
-✅ The code itself shows an error (e.g., import fails in the diff)
-✅ There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
+There's an obvious typo (e.g., "monggo" instead of "mongo")
+The code itself shows an error (e.g., import fails in the diff)
+There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
 
 When in doubt about versions/imports: ASSUME THE DEVELOPER IS CORRECT and skip it.
 
 SUGGESTIONS:
-- When the fix is OBVIOUS and simple, include a "suggestion" field with the corrected code
-- The suggestion should contain ONLY the fixed code (not diff markers like +/-)
-- Only include suggestions for simple fixes (typos, obvious bugs, missing fields, etc.)
-- Do NOT include suggestions for complex refactorings or architectural changes
-- DO NOT suggest version/import changes unless there's an obvious typo
-- Format: just the corrected code, no explanations
-
+- When a fix is simple, provide a "suggestion" field.
+- **GitLab Syntax Requirement**: You must format the suggestion using relative line offsets based on your `start_line` and `end_line`.
+- **The Formula**:
+  1. Calculate the offset: `L = end_line - start_line`.
+  2. The header MUST be: ```suggestion:-L+0
+- **Example**: If `start_line` is 7 and `end_line` is 9, the offset `L` is 2. The header is ```suggestion:-2+0.
+- **Content**: The suggestion must include the full corrected code for every line from `start_line` to `end_line`.
+- **Indentation**: You MUST preserve the exact leading whitespace of the original code.
+- Format:
+```suggestion:-L+0
+[CORRECTED CODE BLOCK]
+```
 Output format: JSON array of issue objects following this schema:
 {IssueModel.model_json_schema()}
 
@@ -397,13 +551,11 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
 
         console.print(f"[green]Completed review of: {file_path}[/green]")
         console.print(
-            f"Raw response: {raw[:200]}..."
-            if len(str(raw)) > 200
-            else f"Raw response: {raw}"
+            f"Raw response: {raw[:200]}..." if len(str(raw)) > 200 else f"Raw response: {raw}"
         )
 
         # Parse issues from response
-        issues: List[IssueModel] = []
+        issues: list[IssueModel] = []
         if isinstance(raw, str):
             try:
                 import json
@@ -414,9 +566,7 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
                         try:
                             issues.append(IssueModel.model_validate(issue_data))
                         except Exception as e:
-                            console.print(
-                                f"[yellow]Failed to validate issue: {e}[/yellow]"
-                            )
+                            console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
                 elif isinstance(parsed, dict):
                     try:
                         issues.append(IssueModel.model_validate(parsed))
