@@ -20,8 +20,8 @@ posts actionable review notes back to the MR.
 Reviewbot wires together diff fetching, codebase context, and LLM reasoning to automate code
 reviews on GitLab:
 
-- **Multi-Agent Review Flow**. Coordinates tasks like diff inspection, context lookup, and issue
-  synthesis
+- **Multi-Agent Review Flow**. Coordinates tasks like diff inspection, context lookup, issue
+  synthesis, and issue validation to reduce hallucinations
 - **MR-Centric**. Works on GitLab MRs and posts discussions/notes back to the MR
 - **Codebase Context**. Optional embeddings + search for better review depth
 - **Ignore Rules**. Supports `.reviewignore` and global ignore patterns to skip noise

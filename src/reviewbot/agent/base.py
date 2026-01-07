@@ -39,7 +39,7 @@ def agent_runner(input: AgentRunnerInput) -> list[Issue]:
     if not store_manager:
         raise ValueError("Store manager not found")
 
-    # Step 1: Identify the issues
+    # Step 1: Identify and validate issues
     issues = identify_issues(
         ctx=IssuesInput(
             agent=agent,
