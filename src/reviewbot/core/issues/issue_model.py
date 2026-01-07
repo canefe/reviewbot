@@ -14,6 +14,8 @@ class IssueModel(BaseModel):
     severity: IssueSeverity
     status: str
     suggestion: str | None = None  # Optional code suggestion to fix the issue
+    discussion_id: str | None = None
+    note_id: str | None = None
 
     def to_domain(self) -> Issue:
         return Issue(**self.model_dump())

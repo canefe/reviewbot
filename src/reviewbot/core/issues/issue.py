@@ -24,3 +24,4 @@ class Issue:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     discussion_id: str | None = None
+    note_id: str | None = None

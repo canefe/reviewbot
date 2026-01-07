@@ -66,7 +66,7 @@ def post_discussion(
             or "line_code" in position
             or "line_range" in position  # Support multi-line positions
         )
-        if has_line_info:
+        if has_line_info or position["position_type"] == "file":
             data["position"] = position
         else:
             # Position is incomplete, skip it for file-level discussions
@@ -117,7 +117,7 @@ def post_discussion_reply(
     discussion_id: str,
     body: str,
     timeout: int = 30,
-) -> None:
+) -> str | None:
     url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{merge_request_id}/discussions/{discussion_id}/notes"
     r = requests.post(
         url,
@@ -126,6 +126,10 @@ def post_discussion_reply(
         timeout=timeout,
     )
     r.raise_for_status()
+    try:
+        return r.json().get("id")
+    except Exception:
+        return None
 
 
 # Wrapper functions for easier use
@@ -165,11 +169,11 @@ def reply_to_discussion(
     token: str,
     project_id: str,
     mr_iid: str,
-) -> None:
+) -> str | None:
     """
-    Reply to an existing discussion.
+    Reply to an existing discussion and return the note ID if available.
     """
-    post_discussion_reply(
+    return post_discussion_reply(
         api_v4=api_v4,
         token=token,
         project_id=project_id,

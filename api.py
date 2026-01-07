@@ -5,7 +5,8 @@ import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from src.reviewbot.agent.workflow import post_mr_note, work_agent
+from src.reviewbot.agent.workflow import work_agent
+from src.reviewbot.agent.workflow.gitlab_notes import post_mr_note
 from src.reviewbot.infra.config.env import load_env
 
 dotenv.load_dotenv()
