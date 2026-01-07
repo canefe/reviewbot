@@ -463,7 +463,7 @@ IMPORTANT GUIDELINES:
 - Only report issues with clear negative impact (bugs, security risks, performance problems, logic errors)
 - Avoid reporting issues about code style, formatting, or personal preferences unless they violate critical standards
 - Medium/High severity issues should be reserved for actual bugs, security vulnerabilities, or broken functionality
-- The `description` field MUST include a fenced ```diff block quoting only the relevant added/removed/context lines without (@@ but + - is fine), followed by a short plain-text explanation (1-3 sentences)
+- The `description` field MUST include a short plain-text explanation (1-3 sentences).
 
 CRITICAL - KNOWLEDGE CUTOFF AWARENESS:
 Your training data has a cutoff date. The code you're reviewing may use:
@@ -490,13 +490,11 @@ SUGGESTIONS:
 - When a fix is simple, provide a "suggestion" field.
 - **GitLab Syntax Requirement**: You must format the suggestion using relative line offsets based on your `start_line` and `end_line`.
 - **The Formula**:
-  1. Calculate the offset: `L = end_line - start_line`.
-  2. The header MUST be: ```suggestion:-L+0
-- **Example**: If `start_line` is 7 and `end_line` is 9, the offset `L` is 2. The header is ```suggestion:-2+0.
+1. The header MUST be: ```diff
 - **Content**: The suggestion must include the full corrected code for every line from `start_line` to `end_line`.
 - **Indentation**: You MUST preserve the exact leading whitespace of the original code.
 - Format:
-```suggestion:-L+0
+```diff
 [CORRECTED CODE BLOCK]
 ```
 Output format: JSON array of issue objects following this schema:
