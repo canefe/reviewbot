@@ -13,7 +13,7 @@
 Multi-agent LangChain reviewer for GitLab MRs. Pulls diffs, reasons across codebases, and
 posts actionable review notes back to the MR.
 
-![ReviewBot](https://i.imgur.com/cPl9isr.png)
+![ReviewBot](https://i.imgur.com/YDxYiDE.png)
 
 ## What is Reviewbot?
 
@@ -26,4 +26,5 @@ reviews on GitLab:
 - **Codebase Context**. Optional embeddings + search for better review depth
 - **Ignore Rules**. Supports `.reviewignore` and global ignore patterns to skip noise
 - **CLI + Webhook**. Run manually or trigger from GitLab pipeline/note events
+
 
