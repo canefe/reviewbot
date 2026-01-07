@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -514,15 +515,7 @@ DO NOT report:
 - Hypothetical edge cases without evidence they're relevant
 - Refactoring suggestions unless current code is broken
 - Version numbers, import paths, or package versions you're unfamiliar with
-
-CONTEXT AWARENESS:
-- If you need to verify package versions, you can use read_file to check:
-  - Go: go.mod, go.sum
-  - Python: requirements.txt, pyproject.toml, Pipfile
-  - Node: package.json, package-lock.json
-  - Rust: Cargo.toml, Cargo.lock
-- Use this to understand what versions are ACTUALLY being used in the project
-- Trust the dependency files over your training data
+- Missing imports
 
 Be specific and reference exact line numbers from the diff."""
         ),
@@ -531,13 +524,12 @@ Be specific and reference exact line numbers from the diff."""
 
 INSTRUCTIONS:
 1. Use the get_diff("{file_path}") tool ONCE to retrieve the diff
-2. Review the diff content directly - DO NOT search for other files or read other files unless absolutely necessary
+2. Review the diff content directly - read other files if absolutely necessary for more context
 3. Output your findings immediately in JSON format
 
 Analyze ONLY this file's diff. If you find legitimate issues, output them in JSON format.
 If there are no real issues, output an empty array: []
-
-Be efficient with your tool calls, they are limited, so use them wisely."""
+"""
         ),
     ]
 
@@ -552,26 +544,11 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
             f"Raw response: {raw[:200]}..." if len(str(raw)) > 200 else f"Raw response: {raw}"
         )
 
-        # Parse issues from response
-        issues: list[IssueModel] = []
-        if isinstance(raw, str):
-            try:
-                import json
+        issues = parse_issues_from_response(raw, file_path, "review")
 
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    for issue_data in parsed:
-                        try:
-                            issues.append(IssueModel.model_validate(issue_data))
-                        except Exception as e:
-                            console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
-                elif isinstance(parsed, dict):
-                    try:
-                        issues.append(IssueModel.model_validate(parsed))
-                    except Exception as e:
-                        console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
-            except json.JSONDecodeError as e:
-                console.print(f"[red]Failed to parse JSON for {file_path}: {e}[/red]")
+        if issues:
+            # Validate issues against the diff to reduce hallucinations before creating notes.
+            issues = validate_issues_for_file(agent, file_path, issues, settings)
 
         console.print(f"[blue]Found {len(issues)} issues in {file_path}[/blue]")
         return issues
@@ -582,3 +559,151 @@ Be efficient with your tool calls, they are limited, so use them wisely."""
 
         traceback.print_exc()
         return []
+
+
+def parse_issues_from_response(
+    raw: Any,
+    file_path: str,
+    context_label: str,
+) -> list[IssueModel]:
+    issues: list[IssueModel] = []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                for issue_data in parsed:
+                    try:
+                        issues.append(IssueModel.model_validate(issue_data))
+                    except Exception as e:
+                        console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
+            elif isinstance(parsed, dict):
+                try:
+                    issues.append(IssueModel.model_validate(parsed))
+                except Exception as e:
+                    console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Failed to parse JSON for {file_path} ({context_label}): {e}[/red]")
+    return issues
+
+
+def validate_issues_for_file(
+    agent: Any,
+    file_path: str,
+    issues: list[IssueModel],
+    settings: ToolCallerSettings,
+) -> list[IssueModel]:
+    if not issues:
+        return []
+
+    try:
+        from reviewbot.tools import get_diff as get_diff_tool
+
+        diff_content = get_diff_tool.invoke({"file_path": file_path})
+    except Exception as e:
+        console.print(f"[yellow]Issue validation skipped for {file_path}: {e}[/yellow]")
+        return []
+
+    # Use JSON-friendly payload so enums serialize cleanly.
+    issues_payload = [issue.model_dump(mode="json") for issue in issues]
+    messages: list[BaseMessage] = [
+        SystemMessage(
+            content=(
+                "You are an issue checker. Validate each issue strictly against the diff.\n"
+                "Keep an issue ONLY if the diff provides direct evidence that the issue is real.\n"
+                "Do NOT create new issues and do NOT modify fields. For any removed issue, provide\n"
+                "a short reason grounded in the diff. Do not use tools."
+            )
+        ),
+        HumanMessage(
+            content=f"""File: {file_path}
+
+Diff:
+```diff
+{diff_content}
+```
+
+Issues to validate (JSON):
+{json.dumps(issues_payload, indent=2)}
+
+Return ONLY a JSON object in this exact shape:
+{{
+  "valid_issues": [<subset of input issues unchanged>],
+  "removed": [
+    {{
+      "issue": <the exact issue object removed>,
+      "reason": "<short reason>"
+    }}
+  ]
+}}"""
+        ),
+    ]
+
+    validation_settings = ToolCallerSettings(
+        max_tool_calls=0,
+        max_iterations=1,
+        max_retries=settings.max_retries,
+        retry_delay=settings.retry_delay,
+        retry_max_delay=settings.retry_max_delay,
+    )
+
+    try:
+        raw = with_retry(tool_caller, validation_settings, agent, messages, validation_settings)
+    except Exception as e:
+        console.print(f"[yellow]Issue validation failed for {file_path}: {e}[/yellow]")
+        return issues
+
+    validated, removed = parse_validation_response(raw, file_path)
+    if validated is None:
+        console.print(
+            f"[yellow]Issue validation response invalid for {file_path}; keeping original issues[/yellow]"
+        )
+        return issues
+
+    if removed:
+        console.print(f"[dim]Issue validation removed {len(removed)} issue(s) in {file_path}[/dim]")
+        for entry in removed:
+            reason = entry.get("reason", "").strip()
+            issue = entry.get("issue", {})
+            title = issue.get("title", "Untitled issue")
+            if reason:
+                console.print(f"[dim]- {title}: {reason}[/dim]")
+            else:
+                console.print(f"[dim]- {title}: no reason provided[/dim]")
+
+    return validated
+
+
+def parse_validation_response(
+    raw: Any,
+    file_path: str,
+) -> tuple[list[IssueModel] | None, list[dict[str, Any]]]:
+    if not isinstance(raw, str):
+        return None, []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Failed to parse validation JSON for {file_path}: {e}[/red]")
+        return None, []
+
+    if not isinstance(parsed, dict):
+        console.print(
+            f"[red]Validation response for {file_path} is not an object, got {type(parsed)}[/red]"
+        )
+        return None, []
+
+    valid_issues_raw = parsed.get("valid_issues", [])
+    removed = parsed.get("removed", [])
+
+    if not isinstance(valid_issues_raw, list) or not isinstance(removed, list):
+        console.print(f"[red]Validation response for {file_path} missing expected keys[/red]")
+        return None, []
+
+    valid_issues: list[IssueModel] = []
+    for issue_data in valid_issues_raw:
+        try:
+            valid_issues.append(IssueModel.model_validate(issue_data))
+        except Exception as e:
+            console.print(f"[yellow]Failed to validate issue after checking: {e}[/yellow]")
+            return None, []
+
+    return valid_issues, removed
