@@ -1,5 +1,3 @@
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict
 
 from reviewbot.core.issues.issue import Issue, IssueSeverity
@@ -15,7 +13,7 @@ class IssueModel(BaseModel):
     end_line: int
     severity: IssueSeverity
     status: str
-    suggestion: Optional[str] = None  # Optional code suggestion to fix the issue
+    suggestion: str | None = None  # Optional code suggestion to fix the issue
 
     def to_domain(self) -> Issue:
         return Issue(**self.model_dump())

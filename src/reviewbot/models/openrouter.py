@@ -1,5 +1,5 @@
 import os
-from typing import Any, Optional
+from typing import Any
 
 from dotenv import load_dotenv
 from langchain_core.utils.utils import secret_from_env
@@ -10,7 +10,7 @@ load_dotenv()
 
 
 class ChatOpenRouter(ChatOpenAI):
-    api_key: Optional[SecretStr] = Field(
+    api_key: SecretStr | None = Field(
         alias="api_key",
         default_factory=secret_from_env("OPENROUTER_API_KEY", default=None),
     )
@@ -19,7 +19,7 @@ class ChatOpenRouter(ChatOpenAI):
     def lc_secrets(self) -> dict[str, str]:
         return {"openai_api_key": "OPENROUTER_API_KEY"}
 
-    def __init__(self, api_key: Optional[SecretStr] = None, **kwargs: Any):
+    def __init__(self, api_key: SecretStr | None = None, **kwargs: Any):
         api_key = api_key or SecretStr(os.getenv("OPENROUTER_API_KEY", ""))
         super().__init__(
             base_url="https://openrouter.ai/api/v1",

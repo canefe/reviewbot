@@ -11,3 +11,4 @@ class Config:
     gitlab_api_v4: str
     gitlab_token: str
     gemini_project_id: str
+    create_threads: bool = False

@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import requests
 from rich.console import Console
@@ -11,13 +11,13 @@ console = Console()
 
 @dataclass(frozen=True)
 class FileDiff:
-    old_path: Optional[str]  # None for new files
-    new_path: Optional[str]  # None for deleted files
+    old_path: str | None  # None for new files
+    new_path: str | None  # None for deleted files
     is_new_file: bool
     is_deleted_file: bool
     is_renamed: bool
     patch: str  # full unified diff for this file
-    position: Optional[Dict[str, Any]] = None  # GitLab position object for discussions
+    position: dict[str, Any] | None = None  # GitLab position object for discussions
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)\s*$")
@@ -30,10 +30,10 @@ def _strip_prefix(p: str) -> str:
 
 
 def _parse_paths_from_chunk(
-    lines: List[str],
-) -> Tuple[Optional[str], Optional[str], bool, bool, bool]:
-    old_path: Optional[str] = None
-    new_path: Optional[str] = None
+    lines: list[str],
+) -> tuple[str | None, str | None, bool, bool, bool]:
+    old_path: str | None = None
+    new_path: str | None = None
     is_new_file = False
     is_deleted_file = False
     is_renamed = False
@@ -82,11 +82,11 @@ def _parse_paths_from_chunk(
     return old_path, new_path, is_new_file, is_deleted_file, is_renamed
 
 
-def _split_raw_diff_by_file(raw: str) -> List[str]:
+def _split_raw_diff_by_file(raw: str) -> list[str]:
     # Split on "diff --git", keeping the header line with each chunk
     lines = raw.splitlines(keepends=True)
-    chunks: List[List[str]] = []
-    cur: List[str] = []
+    chunks: list[list[str]] = []
+    cur: list[str] = []
 
     for ln in lines:
         if ln.startswith("diff --git "):
@@ -109,7 +109,7 @@ def fetch_mr_diffs(
     mr_iid: str,
     token: str,
     timeout: int = 30,
-) -> Tuple[List[FileDiff], Dict[str, str]]:
+) -> tuple[list[FileDiff], dict[str, str]]:
     """
     Fetch merge request diffs from GitLab API.
 
@@ -128,10 +128,13 @@ def fetch_mr_diffs(
     mr_data = mr_response.json()
 
     # Get diff_refs for position objects
-    diff_refs = mr_data.get("diff_refs", {})
+    diff_refs = mr_data.get("diff_refs") or {}
     base_sha = diff_refs.get("base_sha")
     head_sha = diff_refs.get("head_sha")
     start_sha = diff_refs.get("start_sha")
+    mr_web_url = mr_data.get("web_url")
+    if mr_web_url and "/-/merge_requests/" in mr_web_url:
+        diff_refs["project_web_url"] = mr_web_url.split("/-/merge_requests/")[0]
 
     # Try the new JSON changes endpoint first
     changes_response = requests.get(changes_url, headers=headers, timeout=timeout)
@@ -143,18 +146,18 @@ def fetch_mr_diffs(
 
         if isinstance(changes_data, dict) and "changes" in changes_data:
             # New JSON format with changes array
-            file_diffs: List[FileDiff] = []
+            file_diffs: list[FileDiff] = []
 
             for change in changes_data["changes"]:
-                change_old_path: Optional[str] = change.get("old_path")
-                change_new_path: Optional[str] = change.get("new_path")
+                change_old_path: str | None = change.get("old_path")
+                change_new_path: str | None = change.get("new_path")
                 diff_text: str = change.get("diff", "")
                 change_is_new_file: bool = change.get("new_file", False)
                 change_is_deleted_file: bool = change.get("deleted_file", False)
                 change_is_renamed: bool = change.get("renamed_file", False)
 
                 # Create position object for discussions
-                change_position: Optional[Dict[str, Any]] = None
+                change_position: dict[str, Any] | None = None
                 if base_sha and head_sha and start_sha:
                     # Parse diff to find first hunk with line range information
                     # Parse diff to find first hunk
@@ -163,8 +166,8 @@ def fetch_mr_diffs(
                         r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
                     )
 
-                    change_old_line: Optional[int] = None
-                    change_new_line: Optional[int] = None
+                    change_old_line: int | None = None
+                    change_new_line: int | None = None
 
                     lines = diff_text.splitlines()
                     in_hunk = False
@@ -225,9 +228,7 @@ def fetch_mr_diffs(
                 if not diff_text or change.get("too_large", False):
                     # Fallback to raw diff endpoint for this file
                     raw_diff_url = f"{mr_url}/diffs"
-                    raw_response = requests.get(
-                        raw_diff_url, headers=headers, timeout=timeout
-                    )
+                    raw_response = requests.get(raw_diff_url, headers=headers, timeout=timeout)
                     raw_response.raise_for_status()
                     raw_diff = raw_response.text
 
@@ -238,9 +239,7 @@ def fetch_mr_diffs(
                         if not lines or not lines[0].startswith("diff --git "):
                             continue
 
-                        chunk_old_path, chunk_new_path, _, _, _ = (
-                            _parse_paths_from_chunk(lines)
-                        )
+                        chunk_old_path, chunk_new_path, _, _, _ = _parse_paths_from_chunk(lines)
                         if (chunk_new_path == change_new_path) or (
                             chunk_old_path == change_old_path
                         ):
@@ -273,7 +272,7 @@ def fetch_mr_diffs(
 
     file_chunks = _split_raw_diff_by_file(raw)
 
-    out: List[FileDiff] = []
+    out: list[FileDiff] = []
     for chunk in file_chunks:
         lines = chunk.splitlines(keepends=False)
         if not lines:
@@ -292,16 +291,14 @@ def fetch_mr_diffs(
         # Create position object for discussions
         # GitLab requires line_code or line numbers (new_line/old_line)
         # Extract the first line number from the diff for file-level positioning
-        raw_position: Optional[Dict[str, Any]] = None
+        raw_position: dict[str, Any] | None = None
         if base_sha and head_sha and start_sha:
             # Try to extract the first line number from the diff
-            extracted_new_line: Optional[int] = None
-            extracted_old_line: Optional[int] = None
+            extracted_new_line: int | None = None
+            extracted_old_line: int | None = None
 
             # Parse diff to find first hunk and line numbers
-            hunk_header_pattern = re.compile(
-                r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
-            )
+            hunk_header_pattern = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
             for diff_line in chunk.splitlines():
                 match = hunk_header_pattern.match(diff_line)
                 if match:
@@ -344,9 +341,7 @@ def fetch_mr_diffs(
     return out, diff_refs
 
 
-def get_mr_branch(
-    api_v4: str, project_id: str, mr_iid: str, token: str, timeout: int = 30
-) -> str:
+def get_mr_branch(api_v4: str, project_id: str, mr_iid: str, token: str, timeout: int = 30) -> str:
     api_v4 = api_v4.rstrip("/")
     headers = {"PRIVATE-TOKEN": token}
     mr_url = f"{api_v4}/projects/{project_id}/merge_requests/{mr_iid}"

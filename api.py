@@ -1,33 +1,31 @@
-import asyncio
 import os
-import re
 
 import dotenv
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from src.reviewbot.main import post_merge_request_note, work_agent
+from src.reviewbot.agent.workflow import post_mr_note, work_agent
+from src.reviewbot.infra.config.env import load_env
 
 dotenv.load_dotenv()
 
 app = FastAPI()
 
-GITLAB_SECRET = os.environ.get("GITLAB_WEBHOOK_SECRET")
-GITLAB_TOKEN = os.environ.get("GITLAB_BOT_TOKEN")
-GITLAB_API_V4 = os.environ.get("GITLAB_API_V4_URL")
-BOT_USERNAME = os.environ.get("GITLAB_BOT_USERNAME")  # without @
+
+def get_required_env(key: str) -> str:
+    """Get required environment variable or raise error with helpful message."""
+    value = os.environ.get(key)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {key}")
+    return value
 
 
-def post_mr_note(project_id: str, mr_iid: str, body: str):
-    url = f"{GITLAB_API_V4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/notes"
-    r = requests.post(
-        url,
-        headers={"PRIVATE-TOKEN": GITLAB_TOKEN},
-        data={"body": body},
-        timeout=30,
-    )
-    r.raise_for_status()
+GITLAB_SECRET = get_required_env("GITLAB_WEBHOOK_SECRET")
+GITLAB_TOKEN = get_required_env("GITLAB_BOT_TOKEN")
+GITLAB_API_V4 = get_required_env("GITLAB_API_V4_URL") + "/api/v4"
+BOT_USERNAME = os.environ.get("GITLAB_BOT_USERNAME")
+BOT_ID = get_required_env("GITLAB_BOT_AUTHOR_ID")
 
 
 def get_pipeline_status(project_id: str, pipeline_id: int) -> str:
@@ -61,7 +59,7 @@ def pipeline_passed(project_id: str, pipeline_id: int) -> bool:
 
 
 @app.post("/webhook")
-async def gitlab_webhook(req: Request):
+async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
     token = req.headers.get("X-Gitlab-Token")
     if GITLAB_SECRET and token != GITLAB_SECRET:
         raise HTTPException(status_code=403, detail="Invalid token")
@@ -82,9 +80,12 @@ async def gitlab_webhook(req: Request):
             return JSONResponse({"ignored": "bot note"})
 
         text = note.get("note", "")
-        pattern = rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
-        if not re.search(pattern, text):
-            return JSONResponse({"ignored": "no /review command"})
+        # pattern = rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
+        # if not re.search(pattern, text):
+        #     return JSONResponse({"ignored": "no /review command"})
+
+        if text.strip() != "/reviewbot review":
+            return JSONResponse({"ignored": "not a review command"})
 
         mr = payload.get("merge_request")
         if not mr:
@@ -93,12 +94,12 @@ async def gitlab_webhook(req: Request):
         project_id = payload["project"]["id"]
         mr_iid = mr["iid"]
 
-        await asyncio.to_thread(
+        config = load_env()
+        background_tasks.add_task(
             work_agent,
-            GITLAB_API_V4,
+            config,
             project_id,
             mr_iid,
-            GITLAB_TOKEN,
         )
 
         return JSONResponse({"status": "manual review triggered"})
@@ -112,38 +113,42 @@ async def gitlab_webhook(req: Request):
         detailed_status = attrs.get("detailed_status")
 
         project_id = payload["project"]["id"]
-        mr_iid = mr["iid"]
 
         if detailed_status not in ["passed", "failed"]:
             return JSONResponse({"ignored": "pipeline is not in a final state"})
 
+        if not mr:
+            return JSONResponse({"ignored": "not an MR pipeline"})
+
+        mr_iid = mr["iid"]
+
         if detailed_status != "passed":
-            post_merge_request_note(
+            post_mr_note(
                 GITLAB_API_V4,
                 GITLAB_TOKEN,
                 project_id,
                 mr_iid,
-                "Pipeline was not successful. If you want ReviewBot to review your changes, please re-run the pipeline, and make sure it passes. Or you can manually call ReviewBot by typing: \n\n @project_29_bot_5a466f228cb9d019289c41195219f291 /review",
+                "Pipeline was not successful. If you want ReviewBot to review your changes, please re-run the pipeline, and make sure it passes. Or you can manually call ReviewBot by typing: \n\n /reviewbot review",
             )
             return JSONResponse({"ignored": "pipeline failed"})
 
         # conditions
         if mr_has_conflicts(mr):
-            post_merge_request_note(
+            post_mr_note(
                 GITLAB_API_V4,
                 GITLAB_TOKEN,
                 project_id,
                 mr_iid,
-                "Merge conflicts present. Please resolve them and commit changes to re-run the pipeline. Or you can manually call ReviewBot by typing: \n\n @project_29_bot_5a466f228cb9d019289c41195219f291 /review",
+                "Merge conflicts present. Please resolve them and commit changes to re-run the pipeline. Or you can manually call ReviewBot by typing: \n\n /reviewbot review",
             )
             return JSONResponse({"ignored": "merge conflicts present"})
 
-        await asyncio.to_thread(
+        config = load_env()
+        background_tasks.add_task(
             work_agent,
-            GITLAB_API_V4,
+            config,
             project_id,
             mr_iid,
-            GITLAB_TOKEN,
         )
 
         return JSONResponse({"status": "auto review triggered"})

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional
+from collections.abc import Iterable
 from uuid import UUID
 
 from .issue import Issue
@@ -10,7 +10,7 @@ class IssueStore(ABC):
     def add(self, issue: Issue) -> None: ...
 
     @abstractmethod
-    def get(self, issue_id: UUID) -> Optional[Issue]: ...
+    def get(self, issue_id: UUID) -> Issue | None: ...
 
     @abstractmethod
     def list(self) -> Iterable[Issue]: ...

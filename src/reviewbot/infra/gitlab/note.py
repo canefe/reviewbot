@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 from rich.console import Console
@@ -24,9 +24,7 @@ def post_merge_request_note(
     )
 
     if r.status_code >= 300:
-        raise RuntimeError(
-            f"gitlab note post failed: {r.status_code} {r.reason}: {r.text}"
-        )
+        raise RuntimeError(f"gitlab note post failed: {r.status_code} {r.reason}: {r.text}")
 
 
 def post_discussion(
@@ -35,11 +33,11 @@ def post_discussion(
     project_id: str,
     mr_iid: str,
     body: str,
-    position: Optional[Dict[str, Any]] = None,
+    position: dict[str, Any] | None = None,
     timeout: int = 30,
-) -> str:
+) -> tuple[str, str | None]:
     """
-    Create a new discussion and return its ID.
+    Create a new discussion and return its ID and first note ID.
 
     Args:
         api_v4: GitLab API v4 base URL
@@ -51,19 +49,22 @@ def post_discussion(
         timeout: Request timeout
 
     Returns:
-        The discussion ID from GitLab
+        Tuple of (discussion_id, note_id). note_id may be None if not found.
     """
     url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
 
     # Prepare request data
     # Note: GitLab requires either line_code or complete position with line numbers
     # For file-level discussions without specific lines, don't include position
-    data: Dict[str, Any] = {"body": body}
+    data: dict[str, Any] = {"body": body}
     if position:
-        # Only include position if it has required fields (new_line or old_line)
-        # Otherwise GitLab will reject it as incomplete
+        # Only include position if it has required fields
+        # Can have: new_line, old_line, line_code (single line) OR line_range (multi-line)
         has_line_info = (
-            "new_line" in position or "old_line" in position or "line_code" in position
+            "new_line" in position
+            or "old_line" in position
+            or "line_code" in position
+            or "line_range" in position  # Support multi-line positions
         )
         if has_line_info:
             data["position"] = position
@@ -94,14 +95,18 @@ def post_discussion(
 
     r.raise_for_status()
 
-    # GitLab returns the created discussion with an 'id' field
+    # GitLab returns the created discussion with an 'id' field and notes array
     response_data = r.json()
     discussion_id = response_data.get("id")
 
     if not discussion_id:
         raise RuntimeError(f"Discussion created but no ID returned: {response_data}")
 
-    return discussion_id
+    # Also return the first note ID (the discussion body note)
+    notes = response_data.get("notes", [])
+    note_id = notes[0].get("id") if notes else None
+
+    return discussion_id, note_id
 
 
 def post_discussion_reply(
@@ -141,7 +146,8 @@ def create_discussion(
     # GitLab discussions don't have separate titles, so we include it in the body
     full_body = f"## {title}\n\n{body}"
 
-    discussion_id = post_discussion(
+    # post_discussion returns (discussion_id, note_id), we only need discussion_id
+    discussion_id, _ = post_discussion(
         api_v4=api_v4,
         token=token,
         project_id=project_id,
@@ -197,7 +203,7 @@ def get_all_discussions(
     project_id: str,
     mr_iid: str,
     timeout: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
     r = requests.get(
         url,
@@ -214,7 +220,7 @@ def get_merge_request_notes(
     project_id: str,
     mr_iid: str,
     timeout: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Get all notes (comments) for a merge request.
 
@@ -236,3 +242,48 @@ def get_merge_request_notes(
     )
     r.raise_for_status()
     return r.json()
+
+
+def update_discussion_note(
+    api_v4: str,
+    token: str,
+    project_id: str,
+    mr_iid: str,
+    discussion_id: str,
+    note_id: str,
+    body: str,
+    timeout: int = 30,
+) -> None:
+    """
+    Update a note in a discussion.
+
+    Args:
+        api_v4: GitLab API v4 base URL
+        token: GitLab API token
+        project_id: Project ID
+        mr_iid: Merge request IID
+        discussion_id: Discussion ID
+        note_id: Note ID to update
+        body: New body content for the note
+        timeout: Request timeout
+    """
+    url = f"{api_v4.rstrip('/')}/projects/{project_id}/merge_requests/{mr_iid}/discussions/{discussion_id}/notes/{note_id}"
+
+    r = requests.put(
+        url,
+        headers={"PRIVATE-TOKEN": token},
+        json={"body": body},
+        timeout=timeout,
+    )
+
+    # Check for errors and raise with detailed information
+    if r.status_code >= 400:
+        console.print(f"[red]Failed to update note: {r.status_code} {r.reason}[/red]")
+        try:
+            error_response = r.json()
+            console.print(f"[red]Error response: {error_response}[/red]")
+        except ValueError:
+            # JSON parsing failed, use text
+            error_response = r.text
+            console.print(f"[red]Error response text: {r.text}[/red]")
+        raise RuntimeError(f"Failed to update note: {r.status_code} {r.reason}: {error_response}")
