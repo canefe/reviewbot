@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, RootModel
 
 from reviewbot.core.issues.issue import Issue, IssueSeverity
 
@@ -19,3 +19,12 @@ class IssueModel(BaseModel):
 
     def to_domain(self) -> Issue:
         return Issue(**self.model_dump())
+
+
+class IssueModelList(RootModel[list[IssueModel]]):
+    """Wrapper for a list of IssueModel objects.
+
+    Use .root to access the underlying list.
+    """
+
+    pass

@@ -1,10 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
-from langgraph.func import entrypoint  # type: ignore
+from idoagents.agents.tool_runner import ToolCallerSettings
 from rich.console import Console
 
-from reviewbot.agent.tasks.core import ToolCallerSettings
 from reviewbot.agent.tasks.issues import IssuesInput, identify_issues
 from reviewbot.context import Context
 from reviewbot.core.agent import Agent
@@ -21,9 +21,12 @@ class AgentRunnerInput:
     settings: ToolCallerSettings = field(default_factory=ToolCallerSettings)
     on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
     quick_scan_agent: Agent | None = None
+    model: Any | None = None
+    tools: list[Any] | None = None
+    quick_scan_model: Any | None = None
+    quick_scan_tools: list[Any] | None = None
 
 
-@entrypoint()
 def agent_runner(input: AgentRunnerInput) -> list[Issue]:
     agent = input.agent
     settings = input.settings
@@ -47,7 +50,11 @@ def agent_runner(input: AgentRunnerInput) -> list[Issue]:
             settings=settings,
             on_file_complete=on_file_complete,
             quick_scan_agent=quick_scan_agent,
+            model=input.model,
+            tools=input.tools,
+            quick_scan_model=input.quick_scan_model,
+            quick_scan_tools=input.quick_scan_tools,
         )
-    ).result()
+    )
 
     return issues

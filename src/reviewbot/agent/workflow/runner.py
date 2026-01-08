@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+from idoagents.agents.tool_runner import ToolCallerSettings
 from langchain.agents import create_agent  # type: ignore
 from rich.console import Console  # type: ignore
 
@@ -8,7 +9,6 @@ from reviewbot.agent.base import (  # type: ignore
     AgentRunnerInput,
     agent_runner,  # type: ignore
 )
-from reviewbot.agent.tasks.core import ToolCallerSettings
 from reviewbot.agent.workflow.config import GitLabConfig
 from reviewbot.agent.workflow.discussions import handle_file_issues
 from reviewbot.agent.workflow.gitlab_notes import (
@@ -43,7 +43,7 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
 
     # Limit tool calls to prevent agent from wandering
     # For diff review: get_diff (1) + maybe read_file for context (1-2) = 3 max
-    settings = ToolCallerSettings(max_tool_calls=5, max_iterations=10)
+    settings = ToolCallerSettings(max_tool_calls=40)
 
     # Only provide essential tools - remove search tools to prevent wandering
     tools = [
@@ -105,6 +105,8 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
         mr_iid=mr_iid,
         agent=low_effort_agent,
         diffs=filtered_diffs,
+        model=low_effort_model,
+        tools=[get_diff, think],
     )
     if acknowledgment_ids:
         console.print(
@@ -129,13 +131,17 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
             handle_file_issues(file_path, issues, gitlab_config, filtered_diffs, diff_refs)
 
         # Pass the callback to the agent runner
-        issues: list[Issue] = agent_runner.invoke(  # type: ignore
+        issues: list[Issue] = agent_runner(
             AgentRunnerInput(
                 agent=agent,
                 context=context,
                 settings=settings,
                 on_file_complete=on_file_review_complete,
                 quick_scan_agent=low_effort_agent,
+                model=model,
+                tools=tools,
+                quick_scan_model=low_effort_model,
+                quick_scan_tools=[get_diff, think],
             )
         )
 
@@ -159,6 +165,8 @@ def work_agent(config: Config, project_id: str, mr_iid: str) -> str:
                 diffs=filtered_diffs,
                 diff_refs=diff_refs,
                 agent=low_effort_agent,
+                model=low_effort_model,
+                tools=[get_diff, think],
             )
             console.print("[dim]update_review_summary completed[/dim]")
         else:

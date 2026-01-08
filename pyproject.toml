@@ -1,6 +1,6 @@
 [project]
 name = "reviewbot"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -8,6 +8,8 @@ dependencies = [
     "dotenv>=0.9.9",
     "faiss-cpu>=1.13.1",
     "fastapi>=0.125.0",
+    "httpx>=0.28.1",
+    "ido-agents",
     "langchain>=1.2.0",
     "langchain-community>=0.4.1",
     "langchain-google-genai>=4.1.2",
@@ -20,10 +22,12 @@ dependencies = [
     "transformers>=4.57.3",
     "typer>=0.20.0",
     "uvicorn>=0.40.0",
-    "xai-review>=0.48.0",
 ]
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+ido-agents = { path = "../../personal/ido-agents", editable = true }
 [project.scripts]
 reviewbot = "reviewbot.main:app"
 [tool.pyright]
@@ -35,15 +39,15 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
+    "E501", # line too long (handled by formatter)
 ]
 
 [tool.ruff.format]
@@ -51,9 +55,6 @@ quote-style = "double"
 indent-style = "space"
 
 [dependency-groups]
-dev = [
-    "ruff>=0.8.6",
-    "ty>=0.0.4",
-]
+dev = ["ruff>=0.8.6", "ty>=0.0.4"]
 [project.optional-dependencies]
 examples = ["fastapi"]
