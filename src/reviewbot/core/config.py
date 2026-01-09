@@ -1,10 +1,7 @@
-from dataclasses import dataclass
-
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 
-@dataclass
-class Config:
+class Config(BaseModel):
     llm_api_key: SecretStr
     llm_base_url: str
     llm_model_name: str
@@ -12,3 +9,8 @@ class Config:
     gitlab_token: str
     gemini_project_id: str
     create_threads: bool = False
+
+    model_config = {
+        "extra": "forbid",
+        "frozen": True,
+    }

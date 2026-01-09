@@ -15,3 +15,5 @@ wheels/
 vectors/
 .env.*
 logs/stdout.log
+.vscode/
+*.code-workspace

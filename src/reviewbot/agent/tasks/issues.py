@@ -1,39 +1,65 @@
-import json
-import threading
+import asyncio
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
-from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
+from ido_agents.agents.ido_agent import create_ido_agent
+from ido_agents.agents.tool_runner import ToolCallerSettings
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from langgraph.func import task
+from langgraph.func import BaseStore, task  # type: ignore
+from pydantic import BaseModel, Field
 from rich.console import Console
 
-from reviewbot.agent.tasks.core import ToolCallerSettings, tool_caller
-from reviewbot.context import Context, store_manager_ctx
-from reviewbot.core.agent import Agent
-from reviewbot.core.issues import Issue, IssueModel
+from reviewbot.agent.workflow.state import CodebaseState, store
+from reviewbot.core.issues import IssueModel
+from reviewbot.core.issues.issue_model import IssueModelList
+from reviewbot.tools.diff import get_diff_from_file
 
 console = Console()
 
 
-def get_reasoning_context() -> str:
+# Pydantic models for structured outputs
+class QuickScanResult(BaseModel):
+    """Result of quick scanning a file to determine if it needs deep review."""
+
+    needs_review: bool = Field(
+        description="True if the file needs deep review, False if it can be skipped"
+    )
+
+
+class ValidationResult(BaseModel):
+    """Result of validating issues against the diff."""
+
+    valid_issues: list[IssueModel] = Field(
+        description="Issues that are confirmed to be valid based on the diff"
+    )
+    removed: list[dict[str, Any]] = Field(
+        description="Issues that were removed, each with 'issue' and 'reason' fields"
+    )
+
+
+def get_reasoning_context(store: BaseStore | None) -> str:
     """
-    Retrieve stored reasoning history from the current context.
+    Retrieve stored reasoning history from the store.
 
     Returns:
         Formatted string of previous reasoning, or empty string if none exists.
     """
-    try:
-        context = store_manager_ctx.get()
-        issue_store = context.get("issue_store")
+    if not store:
+        return ""
 
-        if not issue_store or not hasattr(issue_store, "_reasoning_history"):
+    try:
+        NS = ("reasoning",)
+        existing = store.get(NS, "history")
+
+        if not existing:
             return ""
 
-        reasoning_history = issue_store._reasoning_history
+        history_data = existing.value if hasattr(existing, "value") else existing
+        if not history_data or not (isinstance(history_data, dict) and history_data.get("items")):
+            return ""
+
+        reasoning_history = history_data["items"]
         if not reasoning_history:
             return ""
 
@@ -47,140 +73,69 @@ def get_reasoning_context() -> str:
         return ""
 
 
-def with_retry(func: Callable, settings: ToolCallerSettings, *args, **kwargs) -> Any:
-    """
-    Execute a function with exponential backoff retry logic.
-
-    Args:
-        func: The function to execute
-        settings: Settings containing retry configuration
-        *args, **kwargs: Arguments to pass to the function
-
-    Returns:
-        The result of the function call
-
-    Raises:
-        The last exception if all retries fail
-    """
-    max_retries = settings.max_retries
-    retry_delay = settings.retry_delay
-    retry_max_delay = settings.retry_max_delay
-
-    last_exception = None
-
-    for attempt in range(max_retries + 1):  # +1 for initial attempt
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            last_exception = e
-
-            # If this was the last attempt, raise the exception
-            if attempt >= max_retries:
-                console.print(f"[red]All {max_retries} retries failed. Last error: {e}[/red]")
-                raise
-
-            # Calculate delay with exponential backoff
-            delay = min(retry_delay * (2**attempt), retry_max_delay)
-
-            # Check if it's a retryable error
-            error_msg = str(e).lower()
-            is_retryable = any(
-                keyword in error_msg
-                for keyword in [
-                    "rate limit",
-                    "timeout",
-                    "connection",
-                    "network",
-                    "502",
-                    "503",
-                    "504",
-                    "429",
-                ]
-            )
-
-            if not is_retryable:
-                console.print(f"[yellow]Non-retryable error encountered: {e}[/yellow]")
-                raise
-
-            console.print(f"[yellow]Attempt {attempt + 1}/{max_retries + 1} failed: {e}[/yellow]")
-            console.print(f"[yellow]Retrying in {delay:.1f} seconds...[/yellow]")
-            time.sleep(delay)
-
-    # This should never be reached, but just in case
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("Retry logic failed unexpectedly")
-
-
-@dataclass
-class IssuesInput:
-    agent: Agent
-    context: Context
-    settings: ToolCallerSettings
-    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
-    quick_scan_agent: Agent | None = None
-
-
 @task
-def identify_issues(ctx: IssuesInput) -> list[Issue]:
+async def identify_issues(
+    *,
+    settings: ToolCallerSettings,
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
+    agent: Any,
+    quick_scan_agent: Any | None = None,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
+    quick_scan_model: Any | None = None,
+    quick_scan_tools: list[Any] | None = None,
+) -> list[IssueModel]:
     """
-    Identify the issues in the codebase using concurrent agents per file.
+    Identify issues in the codebase using concurrent agents per file.
+
+    Reads CodebaseState from store and runs concurrent reviews.
+    Returns list of IssueModel objects.
     """
-    agent = ctx.agent
-    context = ctx.context
-    settings = ctx.settings
-    on_file_complete = ctx.on_file_complete
-    quick_scan_agent = ctx.quick_scan_agent
+    # Read codebase state from store
+    NS = ("codebase",)
+    raw = store.get(NS, "state")
+    if not raw:
+        raise ValueError("Codebase state not found in store")
 
-    issue_store = context.get("issue_store")
-    if not issue_store:
-        raise ValueError("Issue store not found")
+    codebase_data = raw.value if hasattr(raw, "value") else raw
+    codebase = CodebaseState.model_validate(codebase_data)
+    diffs = codebase.diffs
 
-    manager = context.get("store_manager")
-    if not manager:
-        raise ValueError("Store manager not found")
-
-    store = manager.get_store()
-    if not store:
-        raise ValueError("Store not found")
-
-    tree = manager.get_tree()
-    diffs = manager.get_diffs()
-
-    if not tree or not diffs:
-        raise ValueError("Tree or diffs not found")
-
-    # Run concurrent reviews - pass the context values and callback
-    all_issues = run_concurrent_reviews(
+    # Run concurrent reviews
+    all_issues = await run_concurrent_reviews(
         agent,
         diffs,
         settings,
-        context,
         on_file_complete=on_file_complete,
         quick_scan_agent=quick_scan_agent,
+        model=model,
+        tools=tools,
+        quick_scan_model=quick_scan_model,
+        quick_scan_tools=quick_scan_tools,
     )
 
-    # Convert to domain objects
-    return [issue.to_domain() for issue in all_issues]
+    return all_issues
 
 
-def monitor_progress(
-    future_to_file: dict,
-    stop_event: threading.Event,
+async def monitor_progress(
+    task_to_file: dict[asyncio.Future[Any], str],
+    start_times: dict[asyncio.Future[Any], float],
+    stop_event: asyncio.Event,
     task_timeout: int = 300,  # 5 minutes per task
 ):
     """
-    Monitor thread that logs the status of ongoing tasks.
+    Monitor coroutine that logs the status of ongoing tasks.
     """
-    start_times = {future: time.time() for future in future_to_file.keys()}
-
     while not stop_event.is_set():
-        time.sleep(10)  # Check every 10 seconds
+        await asyncio.sleep(10)  # Check every 10 seconds
 
         current_time = time.time()
-        for future, file_path in future_to_file.items():
-            if not future.done():
-                elapsed = current_time - start_times[future]
+        for io_task, file_path in task_to_file.items():
+            if not io_task.done():
+                start_time = start_times.get(io_task)
+                if start_time is None:
+                    continue
+                elapsed = current_time - start_time
                 if elapsed > task_timeout:
                     console.print(
                         f"[red]TIMEOUT WARNING: {file_path} has been running for {elapsed:.0f}s[/red]"
@@ -191,24 +146,26 @@ def monitor_progress(
                     )
 
 
-def run_concurrent_reviews(
+async def run_concurrent_reviews(
     agent: Any,
     diffs: list[Any],
     settings: ToolCallerSettings,
-    context: Context,
-    max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
+    max_workers: int = 3,  # Limit concurrency to avoid rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
     on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
     quick_scan_agent: Any | None = None,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
+    quick_scan_model: Any | None = None,
+    quick_scan_tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     """
-    Run concurrent reviews of all diff files with context propagation and monitoring.
+    Run concurrent reviews of all diff files with monitoring.
 
     Args:
         agent: The agent to use for reviews
         diffs: List of diff objects
         settings: Tool caller settings
-        context: Context object
         max_workers: Maximum number of concurrent workers
         task_timeout: Timeout per task in seconds
         on_file_complete: Optional callback function called when each file's review completes.
@@ -223,37 +180,45 @@ def run_concurrent_reviews(
 
     all_issues: list[IssueModel] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a partial function with context baked in
-        review_with_context = partial(
-            review_single_file_with_context,
-            agent=agent,
-            settings=settings,
-            context=context,
-            quick_scan_agent=quick_scan_agent,
-        )
+    semaphore = asyncio.Semaphore(max_workers)
+    task_to_file: dict[asyncio.Future[Any], str] = {}
+    start_times: dict[asyncio.Future[Any], float] = {}
 
-        # Submit tasks
-        future_to_file = {
-            executor.submit(review_with_context, file_path): file_path
-            for file_path in diff_file_paths
-        }
+    # Wrapper to track file_path with result
+    async def review_with_tracking(file_path: str) -> tuple[str, list[IssueModel]]:
+        async with semaphore:
+            task = asyncio.current_task()
+            if task is not None:
+                start_times[task] = time.time()
+                task_to_file[task] = file_path
 
-        # Start monitoring thread
-        stop_monitor = threading.Event()
-        monitor_thread = threading.Thread(
-            target=monitor_progress,
-            args=(future_to_file, stop_monitor, task_timeout),
-            daemon=True,
-        )
-        monitor_thread.start()
+            result = await asyncio.wait_for(
+                review_single_file_wrapper(
+                    file_path=file_path,
+                    agent=agent,
+                    settings=settings,
+                    quick_scan_agent=quick_scan_agent,
+                    model=model,
+                    tools=tools,
+                    quick_scan_model=quick_scan_model,
+                    quick_scan_tools=quick_scan_tools,
+                ),
+                timeout=task_timeout,
+            )
+            return file_path, result
 
-        # Process results with timeout
-        for future in as_completed(future_to_file, timeout=task_timeout * len(diff_file_paths)):
-            file_path = future_to_file[future]
+    # Create tasks
+    tasks = [asyncio.create_task(review_with_tracking(fp)) for fp in diff_file_paths]
+
+    stop_monitor = asyncio.Event()
+    monitor_task = asyncio.create_task(
+        monitor_progress(task_to_file, start_times, stop_monitor, task_timeout)
+    )
+
+    try:
+        for coro in asyncio.as_completed(tasks):
             try:
-                # Get result with per-task timeout
-                issues = future.result(timeout=task_timeout)
+                file_path, issues = await coro
                 all_issues.extend(issues)
                 console.print(f"[green]✓[/green] Processed {file_path}: {len(issues)} issues")
 
@@ -269,16 +234,15 @@ def run_concurrent_reviews(
 
                         traceback.print_exc()
             except TimeoutError:
-                console.print(f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s")
+                console.print(f"[red]✗[/red] TIMEOUT: A file took longer than {task_timeout}s")
             except Exception as e:
-                console.print(f"[red]✗[/red] Failed {file_path}: {e}")
+                console.print(f"[red]✗[/red] Failed: {e}")
                 import traceback
 
                 traceback.print_exc()
-
-        # Stop monitoring thread
+    finally:
         stop_monitor.set()
-        monitor_thread.join(timeout=1)
+        await monitor_task
 
     console.print(
         f"\n[bold green]Review complete! Total issues found: {len(all_issues)}[/bold green]"
@@ -297,20 +261,21 @@ def run_concurrent_reviews(
     return all_issues
 
 
-def quick_scan_file(
+async def quick_scan_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
 ) -> bool:
     """
     Quick scan with low-effort agent to determine if file needs deep review.
     Returns True if file needs deep review, False otherwise.
     """
     # Fetch the diff first to include in prompt
-    from reviewbot.tools import get_diff as get_diff_tool
 
     try:
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
@@ -319,7 +284,7 @@ def quick_scan_file(
         SystemMessage(
             content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
 
-Review the diff and decide if this file needs detailed analysis. Return TRUE if ANY of these apply:
+Review the diff and decide if this file needs detailed analysis. Set needs_review=true if ANY of these apply:
 - New code that implements business logic
 - Changes to security-sensitive code (auth, permissions, data validation)
 - Database queries or migrations
@@ -329,14 +294,12 @@ Review the diff and decide if this file needs detailed analysis. Return TRUE if 
 - Configuration changes that affect behavior
 - Use tool 'think' to reason. You must reason at least 10 times before giving an answer
 
-Return FALSE if:
+Set needs_review=false if:
 - Only formatting/whitespace changes
 - Simple refactoring (renaming variables/functions)
 - Adding/updating comments or documentation only
 - Import reordering
-- Trivial changes (typo fixes in strings, adding logging)
-
-Output ONLY "true" or "false" (lowercase, no quotes)."""
+- Trivial changes (typo fixes in strings, adding logging)"""
         ),
         HumanMessage(
             content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
@@ -345,25 +308,30 @@ Here is the diff:
 
 ```diff
 {diff_content}
-```
-
-Respond with ONLY "true" or "false" based on the criteria above."""
+```"""
         ),
     ]
 
     try:
         console.print(f"[dim]Quick scanning: {file_path}[/dim]")
 
-        raw = with_retry(tool_caller, settings, agent, messages, settings)
-        result = str(raw).strip().lower()
+        if model is None:
+            raise ValueError("model parameter is required for ido-agents migration")
 
-        needs_review = "true" in result
-        if needs_review:
+        ido_agent = create_ido_agent(model=model, tools=tools or [])
+        result = await (
+            ido_agent.with_structured_output(QuickScanResult)
+            .with_tool_caller(settings)
+            .with_retry(max_retries=3)
+            .ainvoke(messages)
+        )
+
+        if result.needs_review:
             console.print(f"[yellow]✓ Needs deep review: {file_path}[/yellow]")
         else:
             console.print(f"[dim]⊘ Skipping deep review: {file_path}[/dim]")
 
-        return needs_review
+        return result.needs_review
     except Exception as e:
         console.print(
             f"[yellow]Quick scan failed for {file_path}, defaulting to deep review: {e}[/yellow]"
@@ -371,62 +339,62 @@ Respond with ONLY "true" or "false" based on the criteria above."""
         return True  # If scan fails, do deep review to be safe
 
 
-def review_single_file_with_context(
+async def review_single_file_wrapper(
     file_path: str,
     agent: Any,
     settings: ToolCallerSettings,
-    context: Context,
     quick_scan_agent: Any | None = None,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
+    quick_scan_model: Any | None = None,
+    quick_scan_tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     """
-    Wrapper that sets context before reviewing.
-    This runs in each worker thread.
+    Wrapper for reviewing a single file with optional quick scan.
+    This runs per async task.
     """
     try:
-        # Set the context var for this thread
-        store_manager_ctx.set(context)
-
-        console.print(f"[dim]Context set for thread processing: {file_path}[/dim]")
-
         # Quick scan first if agent provided
         if quick_scan_agent:
-            needs_deep_review = quick_scan_file(quick_scan_agent, file_path, settings)
+            needs_deep_review = await quick_scan_file(
+                quick_scan_agent, file_path, settings, quick_scan_model, quick_scan_tools
+            )
             if not needs_deep_review:
                 console.print(f"[dim]Skipping deep review for: {file_path}[/dim]")
                 return []
 
         # Now call the actual review function
-        return review_single_file(agent, file_path, settings)
+        return await review_single_file(agent, file_path, settings, model, tools)
     except Exception as e:
-        console.print(f"[red]Exception in thread for {file_path}: {e}[/red]")
+        console.print(f"[red]Exception in task for {file_path}: {e}[/red]")
         import traceback
 
         traceback.print_exc()
         return []
 
 
-def review_single_file(
+async def review_single_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     """
     Review a single diff file and return issues found.
     """
     # Get any previous reasoning context
-    reasoning_context = get_reasoning_context()
+    reasoning_context = get_reasoning_context(agent.store)
 
     # Force a reasoning pass to ensure think() is invoked during deep review
     try:
-        from reviewbot.tools import get_diff as get_diff_tool
-
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
         think_messages: list[BaseMessage] = [
             SystemMessage(
                 content=(
-                    "You are a senior code reviewer. You MUST call think() exactly once "
+                    "You are a senior code reviewer. You must think and review. "
                     "with 2-5 sentences of reasoning about the provided diff. "
-                    "Do not use any other tools. After calling think(), reply with the "
+                    "Do not use any other tools. Once finished, reply with the "
                     "single word DONE."
                 )
             ),
@@ -439,8 +407,10 @@ def review_single_file(
 """,
             ),
         ]
-        think_settings = ToolCallerSettings(max_tool_calls=1, max_iterations=1)
-        tool_caller(agent, think_messages, think_settings)
+        if model:
+            think_settings = ToolCallerSettings(max_tool_calls=40)
+            ido_agent = create_ido_agent(model=model, tools=tools or [])
+            await ido_agent.with_tool_caller(think_settings).ainvoke(think_messages)
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to record reasoning for {file_path}: {e}[/yellow]")
 
@@ -498,8 +468,6 @@ SUGGESTIONS:
 ```diff
 [CORRECTED CODE BLOCK]
 ```
-Output format: JSON array of issue objects following this schema:
-{IssueModel.model_json_schema()}
 
 Focus ONLY on:
 1. **Critical bugs** - Code that will crash or produce incorrect results
@@ -525,10 +493,10 @@ Be specific and reference exact line numbers from the diff."""
 INSTRUCTIONS:
 1. Use the get_diff("{file_path}") tool ONCE to retrieve the diff
 2. Review the diff content directly - read other files if absolutely necessary for more context
-3. Output your findings immediately in JSON format
+3. Return your findings as a list of issues
 
-Analyze ONLY this file's diff. If you find legitimate issues, output them in JSON format.
-If there are no real issues, output an empty array: []
+Analyze ONLY this file's diff. If you find legitimate issues, return them.
+If there are no real issues, return an empty list.
 """
         ),
     ]
@@ -536,19 +504,29 @@ If there are no real issues, output an empty array: []
     try:
         console.print(f"[cyan]Starting review of: {file_path}[/cyan]")
 
-        # Use retry logic for the LLM call
-        raw = with_retry(tool_caller, settings, agent, messages, settings)
+        if model is None:
+            raise ValueError("model parameter is required for ido-agents migration")
 
-        console.print(f"[green]Completed review of: {file_path}[/green]")
-        console.print(
-            f"Raw response: {raw[:200]}..." if len(str(raw)) > 200 else f"Raw response: {raw}"
+        # Use retry logic for the LLM call with structured output
+        ido_agent = create_ido_agent(model=model, tools=tools or [])
+        issues_result = await (
+            ido_agent.with_structured_output(IssueModelList)
+            .with_tool_caller(settings)
+            .with_retry(max_retries=3)
+            .ainvoke(messages)
         )
 
-        issues = parse_issues_from_response(raw, file_path, "review")
+        # Extract the actual list from the RootModel
+        issues = issues_result.root
+
+        console.print(f"[green]Completed review of: {file_path}[/green]")
+        console.print(f"Found {len(issues)} potential issues")
 
         if issues:
             # Validate issues against the diff to reduce hallucinations before creating notes.
-            issues = validate_issues_for_file(agent, file_path, issues, settings)
+            issues = await validate_issues_for_file(
+                agent, file_path, issues, settings, model, tools
+            )
 
         console.print(f"[blue]Found {len(issues)} issues in {file_path}[/blue]")
         return issues
@@ -561,50 +539,29 @@ If there are no real issues, output an empty array: []
         return []
 
 
-def parse_issues_from_response(
-    raw: Any,
-    file_path: str,
-    context_label: str,
-) -> list[IssueModel]:
-    issues: list[IssueModel] = []
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                for issue_data in parsed:
-                    try:
-                        issues.append(IssueModel.model_validate(issue_data))
-                    except Exception as e:
-                        console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
-            elif isinstance(parsed, dict):
-                try:
-                    issues.append(IssueModel.model_validate(parsed))
-                except Exception as e:
-                    console.print(f"[yellow]Failed to validate issue: {e}[/yellow]")
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Failed to parse JSON for {file_path} ({context_label}): {e}[/red]")
-    return issues
-
-
-def validate_issues_for_file(
+async def validate_issues_for_file(
     agent: Any,
     file_path: str,
     issues: list[IssueModel],
     settings: ToolCallerSettings,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     if not issues:
         return []
 
     try:
-        from reviewbot.tools import get_diff as get_diff_tool
-
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Issue validation skipped for {file_path}: {e}[/yellow]")
         return []
 
     # Use JSON-friendly payload so enums serialize cleanly.
     issues_payload = [issue.model_dump(mode="json") for issue in issues]
+
+    # Import json module for dumps
+    import json
+
     messages: list[BaseMessage] = [
         SystemMessage(
             content=(
@@ -622,46 +579,37 @@ Diff:
 {diff_content}
 ```
 
-Issues to validate (JSON):
+Issues to validate:
 {json.dumps(issues_payload, indent=2)}
 
-Return ONLY a JSON object in this exact shape:
-{{
-  "valid_issues": [<subset of input issues unchanged>],
-  "removed": [
-    {{
-      "issue": <the exact issue object removed>,
-      "reason": "<short reason>"
-    }}
-  ]
-}}"""
+Validate each issue and return a ValidationResult with:
+- valid_issues: subset of input issues that are confirmed valid
+- removed: list of entries with 'issue' (the removed issue object) and 'reason' (why it was removed)"""
         ),
     ]
 
-    validation_settings = ToolCallerSettings(
-        max_tool_calls=0,
-        max_iterations=1,
-        max_retries=settings.max_retries,
-        retry_delay=settings.retry_delay,
-        retry_max_delay=settings.retry_max_delay,
-    )
+    validation_settings = ToolCallerSettings(max_tool_calls=0)
 
     try:
-        raw = with_retry(tool_caller, validation_settings, agent, messages, validation_settings)
+        if model is None:
+            raise ValueError("model parameter is required for ido-agents migration")
+
+        ido_agent = create_ido_agent(model=model, tools=tools or [])
+        result = await (
+            ido_agent.with_structured_output(ValidationResult)
+            .with_tool_caller(validation_settings)
+            .with_retry(max_retries=3)
+            .ainvoke(messages)
+        )
     except Exception as e:
         console.print(f"[yellow]Issue validation failed for {file_path}: {e}[/yellow]")
         return issues
 
-    validated, removed = parse_validation_response(raw, file_path)
-    if validated is None:
+    if result.removed:
         console.print(
-            f"[yellow]Issue validation response invalid for {file_path}; keeping original issues[/yellow]"
+            f"[dim]Issue validation removed {len(result.removed)} issue(s) in {file_path}[/dim]"
         )
-        return issues
-
-    if removed:
-        console.print(f"[dim]Issue validation removed {len(removed)} issue(s) in {file_path}[/dim]")
-        for entry in removed:
+        for entry in result.removed:
             reason = entry.get("reason", "").strip()
             issue = entry.get("issue", {})
             title = issue.get("title", "Untitled issue")
@@ -670,40 +618,4 @@ Return ONLY a JSON object in this exact shape:
             else:
                 console.print(f"[dim]- {title}: no reason provided[/dim]")
 
-    return validated
-
-
-def parse_validation_response(
-    raw: Any,
-    file_path: str,
-) -> tuple[list[IssueModel] | None, list[dict[str, Any]]]:
-    if not isinstance(raw, str):
-        return None, []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        console.print(f"[red]Failed to parse validation JSON for {file_path}: {e}[/red]")
-        return None, []
-
-    if not isinstance(parsed, dict):
-        console.print(
-            f"[red]Validation response for {file_path} is not an object, got {type(parsed)}[/red]"
-        )
-        return None, []
-
-    valid_issues_raw = parsed.get("valid_issues", [])
-    removed = parsed.get("removed", [])
-
-    if not isinstance(valid_issues_raw, list) or not isinstance(removed, list):
-        console.print(f"[red]Validation response for {file_path} missing expected keys[/red]")
-        return None, []
-
-    valid_issues: list[IssueModel] = []
-    for issue_data in valid_issues_raw:
-        try:
-            valid_issues.append(IssueModel.model_validate(issue_data))
-        except Exception as e:
-            console.print(f"[yellow]Failed to validate issue after checking: {e}[/yellow]")
-            return None, []
-
-    return valid_issues, removed
+    return result.valid_issues
