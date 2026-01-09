@@ -1,7 +1,7 @@
-from langchain.tools import tool  # type: ignore
+from langchain.tools import ToolRuntime, tool  # type: ignore
 
-from reviewbot.context import store_manager_ctx
 from reviewbot.core.issues import Issue, IssueSeverity
+from reviewbot.infra.issues.in_memory_issue_store import InMemoryIssueStore
 
 
 @tool
@@ -13,6 +13,7 @@ def add_issue(
     end_line: int,
     severity: IssueSeverity,
     status: str,
+    runtime: ToolRuntime,
 ) -> str:
     """Add an issue to the issue store.
 
@@ -28,10 +29,7 @@ def add_issue(
     Returns:
         string with the id of the added issue
     """
-    context = store_manager_ctx.get()
-    issue_store = context.get("issue_store")
-    if not issue_store:
-        return "Issue store not found."
+    issue_store = InMemoryIssueStore(runtime.store)
 
     issue = Issue(
         title=title,

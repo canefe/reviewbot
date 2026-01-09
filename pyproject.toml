@@ -32,6 +32,7 @@ ido-agents = { path = "../../personal/ido-agents", editable = true }
 reviewbot = "reviewbot.main:app"
 [tool.pyright]
 typeCheckingMode = "strict"
+extraPaths = ["src", "../../personal/ido-agents/src"]
 
 [tool.ruff]
 line-length = 100

@@ -1,24 +1,71 @@
 import json
 import re
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import requests
+from pydantic import BaseModel
 from rich.console import Console
 
 console = Console()
 
 
-@dataclass(frozen=True)
-class FileDiff:
-    old_path: str | None  # None for new files
-    new_path: str | None  # None for deleted files
+class LineRangePoint(BaseModel):
+    line_code: str
+    type: Literal["old", "new"]
+    old_line: int | None = None
+    new_line: int | None = None
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+
+class LineRange(BaseModel):
+    start: LineRangePoint
+    end: LineRangePoint
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+
+class DiffPosition(BaseModel):
+    base_sha: str
+    start_sha: str
+    head_sha: str
+
+    position_type: Literal["text", "image", "file"]
+
+    old_path: str | None = None
+    new_path: str | None = None
+
+    old_line: int | None = None
+    new_line: int | None = None
+
+    line_range: LineRange | None = None
+
+    # image-only fields
+    width: int | None = None
+    height: int | None = None
+    x: float | None = None
+    y: float | None = None
+
+    model_config = {
+        "extra": "forbid",
+        "frozen": True,
+    }
+
+
+class FileDiff(BaseModel):
+    old_path: str | None
+    new_path: str | None
     is_new_file: bool
     is_deleted_file: bool
     is_renamed: bool
-    patch: str  # full unified diff for this file
-    position: dict[str, Any] | None = None  # GitLab position object for discussions
+    patch: str
+    position: DiffPosition | None = None
+
+    model_config = {
+        "extra": "forbid",
+        "frozen": True,
+    }
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)\s*$")

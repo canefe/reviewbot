@@ -27,7 +27,7 @@ class AgentRunnerInput:
     quick_scan_tools: list[Any] | None = None
 
 
-def agent_runner(input: AgentRunnerInput) -> list[Issue]:
+async def agent_runner(input: AgentRunnerInput) -> list[Issue]:
     agent = input.agent
     settings = input.settings
     context = input.context
@@ -43,7 +43,7 @@ def agent_runner(input: AgentRunnerInput) -> list[Issue]:
         raise ValueError("Store manager not found")
 
     # Step 1: Identify and validate issues
-    issues = identify_issues(
+    issues = await identify_issues(
         ctx=IssuesInput(
             agent=agent,
             context=context,

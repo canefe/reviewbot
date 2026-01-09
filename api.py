@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import dotenv
@@ -92,15 +93,22 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         if not mr:
             return JSONResponse({"ignored": "not an MR note"})
 
-        project_id = payload["project"]["id"]
-        mr_iid = mr["iid"]
+        project_id = str(payload["project"]["id"])
+        mr_iid = str(mr["iid"])
 
         config = load_env()
-        background_tasks.add_task(
-            work_agent,
-            config,
-            project_id,
-            mr_iid,
+        thread_id = f"{project_id}:{mr_iid}"
+        asyncio.create_task(
+            work_agent.ainvoke(  # type: ignore
+                {
+                    "config": config,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid,
+                },
+                config={
+                    "configurable": {"thread_id": thread_id},
+                },
+            )
         )
 
         return JSONResponse({"status": "manual review triggered"})
@@ -113,7 +121,7 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         mr = payload.get("merge_request")
         detailed_status = attrs.get("detailed_status")
 
-        project_id = payload["project"]["id"]
+        project_id = str(payload["project"]["id"])
 
         if detailed_status not in ["passed", "failed"]:
             return JSONResponse({"ignored": "pipeline is not in a final state"})
@@ -121,7 +129,7 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         if not mr:
             return JSONResponse({"ignored": "not an MR pipeline"})
 
-        mr_iid = mr["iid"]
+        mr_iid = str(mr["iid"])
 
         if detailed_status != "passed":
             post_mr_note(
@@ -145,11 +153,18 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
             return JSONResponse({"ignored": "merge conflicts present"})
 
         config = load_env()
-        background_tasks.add_task(
-            work_agent,
-            config,
-            project_id,
-            mr_iid,
+        thread_id = f"{project_id}:{mr_iid}"
+        asyncio.create_task(
+            work_agent.ainvoke(  # type: ignore
+                {
+                    "config": config,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid,
+                },
+                config={
+                    "configurable": {"thread_id": thread_id},
+                },
+            )
         )
 
         return JSONResponse({"status": "auto review triggered"})

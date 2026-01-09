@@ -1,21 +1,19 @@
-import threading
+import asyncio
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
-from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
 from idoagents.agents.ido_agent import create_ido_agent
 from idoagents.agents.tool_runner import ToolCallerSettings
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langgraph.func import task  # type: ignore
 from pydantic import BaseModel, Field
 from rich.console import Console
 
-from reviewbot.context import Context, store_manager_ctx
-from reviewbot.core.agent import Agent
-from reviewbot.core.issues import Issue, IssueModel
+from reviewbot.agent.workflow.state import CodebaseState, store
+from reviewbot.core.issues import IssueModel
 from reviewbot.core.issues.issue_model import IssueModelList
+from reviewbot.tools.diff import get_diff_from_file
 
 console = Console()
 
@@ -42,19 +40,23 @@ class ValidationResult(BaseModel):
 
 def get_reasoning_context() -> str:
     """
-    Retrieve stored reasoning history from the current context.
+    Retrieve stored reasoning history from the store.
 
     Returns:
         Formatted string of previous reasoning, or empty string if none exists.
     """
     try:
-        context = store_manager_ctx.get()
-        issue_store = context.get("issue_store")
+        NS = ("reasoning",)
+        existing = store.get(NS, "history")
 
-        if not issue_store or not hasattr(issue_store, "_reasoning_history"):
+        if not existing:
             return ""
 
-        reasoning_history = issue_store._reasoning_history
+        history_data = existing.value if hasattr(existing, "value") else existing
+        if not history_data or not history_data.get("items"):
+            return ""
+
+        reasoning_history = history_data["items"]
         if not reasoning_history:
             return ""
 
@@ -68,82 +70,96 @@ def get_reasoning_context() -> str:
         return ""
 
 
-@dataclass
-class IssuesInput:
-    agent: Agent
-    context: Context
-    settings: ToolCallerSettings
-    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None
-    quick_scan_agent: Agent | None = None
-    model: Any | None = None
-    tools: list[Any] | None = None
-    quick_scan_model: Any | None = None
-    quick_scan_tools: list[Any] | None = None
-
-
-def identify_issues(ctx: IssuesInput) -> list[Issue]:
+@task
+async def review_all_files(*, settings: ToolCallerSettings) -> list[IssueModel]:
     """
-    Identify the issues in the codebase using concurrent agents per file.
+    Reads CodebaseState from store.
+    Runs concurrent reviews internally.
+    Returns IssueModels (also written to store).
     """
-    agent = ctx.agent
-    context = ctx.context
-    settings = ctx.settings
-    on_file_complete = ctx.on_file_complete
-    quick_scan_agent = ctx.quick_scan_agent
+    NS = ("codebase",)
+    raw = store.get(NS, "state")
+    codebase = CodebaseState.model_validate(raw)
 
-    issue_store = context.get("issue_store")
-    if not issue_store:
-        raise ValueError("Issue store not found")
+    diffs = codebase.diffs
 
-    manager = context.get("store_manager")
-    if not manager:
-        raise ValueError("Store manager not found")
+    # Build agents
+    agent = create_ido_agent()
+    quick_scan_agent = create_ido_agent()
 
-    store = manager.get_store()
-    if not store:
-        raise ValueError("Store not found")
+    issues = await run_concurrent_reviews(
+        agent=agent,
+        diffs=diffs,
+        settings=settings,
+        quick_scan_agent=quick_scan_agent,
+    )
 
-    tree = manager.get_tree()
-    diffs = manager.get_diffs()
+    return [IssueModel.from_domain(i) for i in issues]
 
-    if not tree or not diffs:
-        raise ValueError("Tree or diffs not found")
 
-    # Run concurrent reviews - pass the context values and callback
-    all_issues = run_concurrent_reviews(
+@task
+async def identify_issues(
+    *,
+    settings: ToolCallerSettings,
+    on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
+    agent: Any,
+    quick_scan_agent: Any | None = None,
+    model: Any | None = None,
+    tools: list[Any] | None = None,
+    quick_scan_model: Any | None = None,
+    quick_scan_tools: list[Any] | None = None,
+) -> list[IssueModel]:
+    """
+    Identify issues in the codebase using concurrent agents per file.
+
+    Reads CodebaseState from store and runs concurrent reviews.
+    Returns list of IssueModel objects.
+    """
+    # Read codebase state from store
+    NS = ("codebase",)
+    raw = store.get(NS, "state")
+    if not raw:
+        raise ValueError("Codebase state not found in store")
+
+    codebase_data = raw.value if hasattr(raw, "value") else raw
+    codebase = CodebaseState.model_validate(codebase_data)
+    diffs = codebase.diffs
+
+    # Run concurrent reviews
+    all_issues = await run_concurrent_reviews(
         agent,
         diffs,
         settings,
-        context,
         on_file_complete=on_file_complete,
         quick_scan_agent=quick_scan_agent,
-        model=ctx.model,
-        tools=ctx.tools,
-        quick_scan_model=ctx.quick_scan_model,
-        quick_scan_tools=ctx.quick_scan_tools,
+        model=model,
+        tools=tools,
+        quick_scan_model=quick_scan_model,
+        quick_scan_tools=quick_scan_tools,
     )
 
-    # Convert to domain objects
-    return [issue.to_domain() for issue in all_issues]
+    return all_issues
 
 
-def monitor_progress(
-    future_to_file: dict,
-    stop_event: threading.Event,
+async def monitor_progress(
+    task_to_file: dict[asyncio.Future[Any], str],
+    start_times: dict[asyncio.Future[Any], float],
+    stop_event: asyncio.Event,
     task_timeout: int = 300,  # 5 minutes per task
 ):
     """
-    Monitor thread that logs the status of ongoing tasks.
+    Monitor coroutine that logs the status of ongoing tasks.
     """
-    start_times = {future: time.time() for future in future_to_file.keys()}
-
     while not stop_event.is_set():
-        time.sleep(10)  # Check every 10 seconds
+        await asyncio.sleep(10)  # Check every 10 seconds
 
         current_time = time.time()
-        for future, file_path in future_to_file.items():
-            if not future.done():
-                elapsed = current_time - start_times[future]
+        for io_task, file_path in task_to_file.items():
+            if not io_task.done():
+                start_time = start_times.get(io_task)
+                if start_time is None:
+                    continue
+                elapsed = current_time - start_time
                 if elapsed > task_timeout:
                     console.print(
                         f"[red]TIMEOUT WARNING: {file_path} has been running for {elapsed:.0f}s[/red]"
@@ -154,12 +170,11 @@ def monitor_progress(
                     )
 
 
-def run_concurrent_reviews(
+async def run_concurrent_reviews(
     agent: Any,
     diffs: list[Any],
     settings: ToolCallerSettings,
-    context: Context,
-    max_workers: int = 3,  # Serial processing to avoid thread safety and rate limit issues
+    max_workers: int = 3,  # Limit concurrency to avoid rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
     on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
     quick_scan_agent: Any | None = None,
@@ -169,13 +184,12 @@ def run_concurrent_reviews(
     quick_scan_tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     """
-    Run concurrent reviews of all diff files with context propagation and monitoring.
+    Run concurrent reviews of all diff files with monitoring.
 
     Args:
         agent: The agent to use for reviews
         diffs: List of diff objects
         settings: Tool caller settings
-        context: Context object
         max_workers: Maximum number of concurrent workers
         task_timeout: Timeout per task in seconds
         on_file_complete: Optional callback function called when each file's review completes.
@@ -190,41 +204,64 @@ def run_concurrent_reviews(
 
     all_issues: list[IssueModel] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a partial function with context baked in
-        review_with_context = partial(
-            review_single_file_with_context,
-            agent=agent,
-            settings=settings,
-            context=context,
-            quick_scan_agent=quick_scan_agent,
-            model=model,
-            tools=tools,
-            quick_scan_model=quick_scan_model,
-            quick_scan_tools=quick_scan_tools,
-        )
+    semaphore = asyncio.Semaphore(max_workers)
+    task_to_file: dict[asyncio.Future[Any], str] = {}
+    start_times: dict[asyncio.Future[Any], float] = {}
 
-        # Submit tasks
-        future_to_file = {
-            executor.submit(review_with_context, file_path): file_path
-            for file_path in diff_file_paths
-        }
+    async def review_with_semaphore(file_path: str) -> list[IssueModel]:
+        async with semaphore:
+            task = asyncio.current_task()
+            if task is not None:
+                start_times[task] = time.time()
+            return await asyncio.wait_for(
+                review_single_file_wrapper(
+                    file_path=file_path,
+                    agent=agent,
+                    settings=settings,
+                    quick_scan_agent=quick_scan_agent,
+                    model=model,
+                    tools=tools,
+                    quick_scan_model=quick_scan_model,
+                    quick_scan_tools=quick_scan_tools,
+                ),
+                timeout=task_timeout,
+            )
 
-        # Start monitoring thread
-        stop_monitor = threading.Event()
-        monitor_thread = threading.Thread(
-            target=monitor_progress,
-            args=(future_to_file, stop_monitor, task_timeout),
-            daemon=True,
-        )
-        monitor_thread.start()
+    # Wrapper to track file_path with result
+    async def review_with_tracking(file_path: str) -> tuple[str, list[IssueModel]]:
+        async with semaphore:
+            task = asyncio.current_task()
+            if task is not None:
+                start_times[task] = time.time()
+                task_to_file[task] = file_path
 
-        # Process results with timeout
-        for future in as_completed(future_to_file, timeout=task_timeout * len(diff_file_paths)):
-            file_path = future_to_file[future]
+            result = await asyncio.wait_for(
+                review_single_file_wrapper(
+                    file_path=file_path,
+                    agent=agent,
+                    settings=settings,
+                    quick_scan_agent=quick_scan_agent,
+                    model=model,
+                    tools=tools,
+                    quick_scan_model=quick_scan_model,
+                    quick_scan_tools=quick_scan_tools,
+                ),
+                timeout=task_timeout,
+            )
+            return file_path, result
+
+    # Create tasks
+    tasks = [asyncio.create_task(review_with_tracking(fp)) for fp in diff_file_paths]
+
+    stop_monitor = asyncio.Event()
+    monitor_task = asyncio.create_task(
+        monitor_progress(task_to_file, start_times, stop_monitor, task_timeout)
+    )
+
+    try:
+        for coro in asyncio.as_completed(tasks):
             try:
-                # Get result with per-task timeout
-                issues = future.result(timeout=task_timeout)
+                file_path, issues = await coro
                 all_issues.extend(issues)
                 console.print(f"[green]✓[/green] Processed {file_path}: {len(issues)} issues")
 
@@ -240,16 +277,15 @@ def run_concurrent_reviews(
 
                         traceback.print_exc()
             except TimeoutError:
-                console.print(f"[red]✗[/red] TIMEOUT: {file_path} took longer than {task_timeout}s")
+                console.print(f"[red]✗[/red] TIMEOUT: A file took longer than {task_timeout}s")
             except Exception as e:
-                console.print(f"[red]✗[/red] Failed {file_path}: {e}")
+                console.print(f"[red]✗[/red] Failed: {e}")
                 import traceback
 
                 traceback.print_exc()
-
-        # Stop monitoring thread
+    finally:
         stop_monitor.set()
-        monitor_thread.join(timeout=1)
+        await monitor_task
 
     console.print(
         f"\n[bold green]Review complete! Total issues found: {len(all_issues)}[/bold green]"
@@ -268,7 +304,7 @@ def run_concurrent_reviews(
     return all_issues
 
 
-def quick_scan_file(
+async def quick_scan_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
@@ -280,10 +316,9 @@ def quick_scan_file(
     Returns True if file needs deep review, False otherwise.
     """
     # Fetch the diff first to include in prompt
-    from reviewbot.tools import get_diff as get_diff_tool
 
     try:
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
@@ -327,11 +362,11 @@ Here is the diff:
             raise ValueError("model parameter is required for ido-agents migration")
 
         ido_agent = create_ido_agent(model=model, tools=tools or [])
-        result = (
+        result = await (
             ido_agent.with_structured_output(QuickScanResult)
             .with_tool_caller(settings)
             .with_retry(max_retries=3)
-            .invoke(messages)
+            .ainvoke(messages)
         )
 
         if result.needs_review:
@@ -347,11 +382,10 @@ Here is the diff:
         return True  # If scan fails, do deep review to be safe
 
 
-def review_single_file_with_context(
+async def review_single_file_wrapper(
     file_path: str,
     agent: Any,
     settings: ToolCallerSettings,
-    context: Context,
     quick_scan_agent: Any | None = None,
     model: Any | None = None,
     tools: list[Any] | None = None,
@@ -359,18 +393,13 @@ def review_single_file_with_context(
     quick_scan_tools: list[Any] | None = None,
 ) -> list[IssueModel]:
     """
-    Wrapper that sets context before reviewing.
-    This runs in each worker thread.
+    Wrapper for reviewing a single file with optional quick scan.
+    This runs per async task.
     """
     try:
-        # Set the context var for this thread
-        store_manager_ctx.set(context)
-
-        console.print(f"[dim]Context set for thread processing: {file_path}[/dim]")
-
         # Quick scan first if agent provided
         if quick_scan_agent:
-            needs_deep_review = quick_scan_file(
+            needs_deep_review = await quick_scan_file(
                 quick_scan_agent, file_path, settings, quick_scan_model, quick_scan_tools
             )
             if not needs_deep_review:
@@ -378,16 +407,16 @@ def review_single_file_with_context(
                 return []
 
         # Now call the actual review function
-        return review_single_file(agent, file_path, settings, model, tools)
+        return await review_single_file(agent, file_path, settings, model, tools)
     except Exception as e:
-        console.print(f"[red]Exception in thread for {file_path}: {e}[/red]")
+        console.print(f"[red]Exception in task for {file_path}: {e}[/red]")
         import traceback
 
         traceback.print_exc()
         return []
 
 
-def review_single_file(
+async def review_single_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
@@ -402,9 +431,7 @@ def review_single_file(
 
     # Force a reasoning pass to ensure think() is invoked during deep review
     try:
-        from reviewbot.tools import get_diff as get_diff_tool
-
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
         think_messages: list[BaseMessage] = [
             SystemMessage(
                 content=(
@@ -426,7 +453,7 @@ def review_single_file(
         if model:
             think_settings = ToolCallerSettings(max_tool_calls=40)
             ido_agent = create_ido_agent(model=model, tools=tools or [])
-            ido_agent.with_tool_caller(think_settings).invoke(think_messages)
+            await ido_agent.with_tool_caller(think_settings).ainvoke(think_messages)
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to record reasoning for {file_path}: {e}[/yellow]")
 
@@ -525,11 +552,11 @@ If there are no real issues, return an empty list.
 
         # Use retry logic for the LLM call with structured output
         ido_agent = create_ido_agent(model=model, tools=tools or [])
-        issues_result = (
+        issues_result = await (
             ido_agent.with_structured_output(IssueModelList)
             .with_tool_caller(settings)
             .with_retry(max_retries=3)
-            .invoke(messages)
+            .ainvoke(messages)
         )
 
         # Extract the actual list from the RootModel
@@ -540,7 +567,9 @@ If there are no real issues, return an empty list.
 
         if issues:
             # Validate issues against the diff to reduce hallucinations before creating notes.
-            issues = validate_issues_for_file(agent, file_path, issues, settings, model, tools)
+            issues = await validate_issues_for_file(
+                agent, file_path, issues, settings, model, tools
+            )
 
         console.print(f"[blue]Found {len(issues)} issues in {file_path}[/blue]")
         return issues
@@ -553,7 +582,7 @@ If there are no real issues, return an empty list.
         return []
 
 
-def validate_issues_for_file(
+async def validate_issues_for_file(
     agent: Any,
     file_path: str,
     issues: list[IssueModel],
@@ -565,9 +594,7 @@ def validate_issues_for_file(
         return []
 
     try:
-        from reviewbot.tools import get_diff as get_diff_tool
-
-        diff_content = get_diff_tool.invoke({"file_path": file_path})
+        diff_content = get_diff_from_file(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Issue validation skipped for {file_path}: {e}[/yellow]")
         return []
@@ -611,11 +638,11 @@ Validate each issue and return a ValidationResult with:
             raise ValueError("model parameter is required for ido-agents migration")
 
         ido_agent = create_ido_agent(model=model, tools=tools or [])
-        result = (
+        result = await (
             ido_agent.with_structured_output(ValidationResult)
             .with_tool_caller(validation_settings)
             .with_retry(max_retries=3)
-            .invoke(messages)
+            .ainvoke(messages)
         )
     except Exception as e:
         console.print(f"[yellow]Issue validation failed for {file_path}: {e}[/yellow]")

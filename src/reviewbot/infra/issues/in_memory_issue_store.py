@@ -1,25 +1,37 @@
 from collections.abc import Iterable
 from uuid import UUID
 
+from langgraph.store.memory import InMemoryStore
+
 from reviewbot.core.issues.issue import Issue
+from reviewbot.core.issues.issue_model import IssueModel
 from reviewbot.core.issues.issue_store import IssueStore
 
 
 class InMemoryIssueStore(IssueStore):
-    def __init__(self) -> None:
-        self._items: dict[UUID, Issue] = {}
+    NS = ("issues",)
+
+    def __init__(self, store: InMemoryStore):
+        self.store = store
 
     def add(self, issue: Issue) -> None:
-        self._items[issue.id] = issue
+        model = IssueModel.from_domain(issue)
+        self.store.put(self.NS, str(issue.id), model.model_dump())
 
     def get(self, issue_id: UUID) -> Issue | None:
-        return self._items.get(issue_id)
+        raw = self.store.get(self.NS, str(issue_id))
+        if raw is None:
+            return None
+        return IssueModel.model_validate(raw).to_domain()
 
     def list(self) -> Iterable[Issue]:
-        return self._items.values()
+        items: list[Issue] = []
+        for raw in self.store.search(self.NS):
+            items.append(IssueModel.model_validate(raw).to_domain())
+        return items
 
     def update(self, issue: Issue) -> None:
-        self._items[issue.id] = issue
+        self.add(issue)
 
     def delete(self, issue_id: UUID) -> None:
-        self._items.pop(issue_id, None)
+        self.store.delete(self.NS, str(issue_id))

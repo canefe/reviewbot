@@ -1,9 +1,11 @@
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.func import task  # type: ignore
 from rich.console import Console  # type: ignore
 
+from reviewbot.agent.workflow.config import GitProviderConfig
 from reviewbot.core.agent import Agent
 from reviewbot.core.issues import Issue, IssueSeverity
 from reviewbot.core.reviews.review import Acknowledgment
@@ -16,19 +18,32 @@ from reviewbot.infra.gitlab.note import (
     update_discussion_note,
 )
 
+
+class AcknowledgmentResult(NamedTuple):
+    discussion_id: str
+    note_id: str
+
+
 console = Console()
 
 
+@task
 def post_review_acknowledgment(
-    api_v4: str,
-    token: str,
-    project_id: str,
-    mr_iid: str,
-    agent: Agent,
-    diffs: list[FileDiff],
-    model: BaseChatModel | None = None,
-    tools: list[Any] | None = None,
-) -> tuple[str, str] | None:
+    *, gitlab: GitProviderConfig, diffs: list[FileDiff], model: BaseChatModel
+) -> AcknowledgmentResult | None:
+    """
+    Posts an initial acknowledgment discussion for the MR review.
+
+    Reads:
+      - CodebaseState from store
+
+    Writes:
+      - acknowledgment ids (returned)
+
+    Returns:
+      AcknowledgmentResult if created, otherwise None
+    """
+
     """
     Post a surface-level summary acknowledging the review is starting.
     Creates a discussion so it can be updated later.
@@ -47,6 +62,10 @@ def post_review_acknowledgment(
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    api_v4 = gitlab.get_api_base_url()
+    token = gitlab.token.get_secret_value()
+    project_id = gitlab.get_project_identifier()
+    mr_iid = gitlab.get_pr_identifier()
     # Check if an acknowledgment already exists
     try:
         discussions = get_all_discussions(
@@ -90,7 +109,7 @@ def post_review_acknowledgment(
             console.print(
                 f"[dim]Found {len(found_acknowledgments)} in-progress review(s), reusing most recent[/dim]"
             )
-            return (most_recent.discussion_id, most_recent.note_id)
+            return AcknowledgmentResult(most_recent.discussion_id, most_recent.note_id)
 
         # No in-progress reviews found - will create a new acknowledgment
         console.print("[dim]No in-progress reviews found, will create new acknowledgment[/dim]")
@@ -130,11 +149,8 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         from idoagents.agents.ido_agent import create_ido_agent
         from idoagents.agents.tool_runner import ToolCallerSettings
 
-        if model is None:
-            raise ValueError("model parameter is required for ido-agents migration")
-
         summary_settings = ToolCallerSettings(max_tool_calls=0)
-        ido_agent = create_ido_agent(model=model, tools=tools or [])
+        ido_agent = create_ido_agent(model=model, tools=[])
         summary = ido_agent.with_tool_caller(summary_settings).invoke(messages)
 
         # Post as a discussion (so we can update it later)
@@ -162,7 +178,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         console.print(
             f"[green]✓ Posted review acknowledgment (discussion: {discussion_id}, note: {note_id})[/green]"
         )
-        return (str(discussion_id), str(note_id))
+        return AcknowledgmentResult(str(discussion_id), str(note_id))
 
     except Exception as e:
         console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
