@@ -27,12 +27,15 @@ def think(reasoning: str, runtime: ToolRuntime) -> str:  # type: ignore
         - "This looks like a potential security issue - user input is being directly
            concatenated into a SQL query. I should flag this as high severity."
     """
+    if not runtime.store:
+        raise ValueError("Store not found in runtime")
+
     # Store reasoning in langgraph store
     NS = ("reasoning",)
     existing = runtime.store.get(NS, "history")
 
     if existing is None:
-        history = {"items": []}
+        history: dict[str, list[str]] = {"items": []}
     else:
         history = existing.value
 

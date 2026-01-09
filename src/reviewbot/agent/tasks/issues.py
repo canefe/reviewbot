@@ -6,7 +6,7 @@ from typing import Any
 from idoagents.agents.ido_agent import create_ido_agent
 from idoagents.agents.tool_runner import ToolCallerSettings
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from langgraph.func import task  # type: ignore
+from langgraph.func import BaseStore, task  # type: ignore
 from pydantic import BaseModel, Field
 from rich.console import Console
 
@@ -38,13 +38,16 @@ class ValidationResult(BaseModel):
     )
 
 
-def get_reasoning_context() -> str:
+def get_reasoning_context(store: BaseStore | None) -> str:
     """
     Retrieve stored reasoning history from the store.
 
     Returns:
         Formatted string of previous reasoning, or empty string if none exists.
     """
+    if not store:
+        return ""
+
     try:
         NS = ("reasoning",)
         existing = store.get(NS, "history")
@@ -68,33 +71,6 @@ def get_reasoning_context() -> str:
         return formatted
     except Exception:
         return ""
-
-
-@task
-async def review_all_files(*, settings: ToolCallerSettings) -> list[IssueModel]:
-    """
-    Reads CodebaseState from store.
-    Runs concurrent reviews internally.
-    Returns IssueModels (also written to store).
-    """
-    NS = ("codebase",)
-    raw = store.get(NS, "state")
-    codebase = CodebaseState.model_validate(raw)
-
-    diffs = codebase.diffs
-
-    # Build agents
-    agent = create_ido_agent()
-    quick_scan_agent = create_ido_agent()
-
-    issues = await run_concurrent_reviews(
-        agent=agent,
-        diffs=diffs,
-        settings=settings,
-        quick_scan_agent=quick_scan_agent,
-    )
-
-    return [IssueModel.from_domain(i) for i in issues]
 
 
 @task
@@ -427,7 +403,7 @@ async def review_single_file(
     Review a single diff file and return issues found.
     """
     # Get any previous reasoning context
-    reasoning_context = get_reasoning_context()
+    reasoning_context = get_reasoning_context(agent.store)
 
     # Force a reasoning pass to ensure think() is invoked during deep review
     try:

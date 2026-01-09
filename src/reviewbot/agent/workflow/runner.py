@@ -127,7 +127,10 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
             f"[dim]Acknowledgment created: discussion={ack.discussion_id}, note={ack.note_id}[/dim]"
         )
     else:
-        console.print("[yellow]⚠ Failed to create acknowledgment (returned None)[/yellow]")
+        console.print(
+            "[yellow]⚠ Failed to create acknowledgment (returned None), stopping... [/yellow]"
+        )
+        return "Review failed: acknowledgment creation returned None"
 
     try:
         # Define callback to create discussions as each file's review completes
