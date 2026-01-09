@@ -3,8 +3,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from idoagents.agents.ido_agent import create_ido_agent
-from idoagents.agents.tool_runner import ToolCallerSettings
+from ido_agents.agents.ido_agent import create_ido_agent
+from ido_agents.agents.tool_runner import ToolCallerSettings
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.func import BaseStore, task  # type: ignore
 from pydantic import BaseModel, Field
