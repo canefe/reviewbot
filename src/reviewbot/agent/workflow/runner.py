@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Any
 
-from idoagents.agents.tool_runner import ToolCallerSettings
-from idoagents.models.openai import OpenAIModelConfig, build_chat_model
+from ido_agents.agents.tool_runner import ToolCallerSettings
+from ido_agents.models.openai import OpenAIModelConfig, build_chat_model
 from langchain.agents import create_agent  # type: ignore
 from langgraph.func import entrypoint  # type: ignore
 from pydantic import BaseModel, SecretStr

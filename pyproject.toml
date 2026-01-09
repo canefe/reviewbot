@@ -9,7 +9,7 @@ dependencies = [
     "faiss-cpu>=1.13.1",
     "fastapi>=0.125.0",
     "httpx>=0.28.1",
-    "ido-agents @ git+https://github.com/canefe/ido-agents.git@v0.1.3",
+    "ido-agents @ git+https://github.com/canefe/ido-agents.git@v0.1.4",
     "langchain>=1.2.0",
     "langchain-community>=0.4.1",
     "langchain-google-genai>=4.1.2",

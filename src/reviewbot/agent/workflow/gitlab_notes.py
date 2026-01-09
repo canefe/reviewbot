@@ -146,8 +146,8 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
 
     try:
         # Get response with no tool calls allowed
-        from idoagents.agents.ido_agent import create_ido_agent
-        from idoagents.agents.tool_runner import ToolCallerSettings
+        from ido_agents.agents.ido_agent import create_ido_agent
+        from ido_agents.agents.tool_runner import ToolCallerSettings
 
         summary_settings = ToolCallerSettings(max_tool_calls=0)
         ido_agent = create_ido_agent(model=model, tools=[])
@@ -245,7 +245,7 @@ def update_review_summary(
 
     # Generate LLM summary with reasoning
     try:
-        from idoagents.agents.ido_agent import create_ido_agent
+        from ido_agents.agents.ido_agent import create_ido_agent
 
         messages = [
             SystemMessage(

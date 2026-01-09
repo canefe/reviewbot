@@ -545,8 +545,8 @@ wheels = [
 
 [[package]]
 name = "ido-agents"
-version = "0.1.3"
-source = { git = "https://github.com/canefe/ido-agents.git?rev=v0.1.3#37b99d9f1678002a0d5e380046dc4a0d89a4fb5b" }
+version = "0.1.4"
+source = { git = "https://github.com/canefe/ido-agents.git?rev=v0.1.4#19d84f10b4e2f39cdd88428137bb1fdc8e0ae817" }
 dependencies = [
     { name = "langchain" },
     { name = "langchain-openai" },
@@ -1478,7 +1478,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.125.0" },
     { name = "fastapi", marker = "extra == 'examples'" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "ido-agents", git = "https://github.com/canefe/ido-agents.git?rev=v0.1.3" },
+    { name = "ido-agents", git = "https://github.com/canefe/ido-agents.git?rev=v0.1.4" },
     { name = "langchain", specifier = ">=1.2.0" },
     { name = "langchain-community", specifier = ">=0.4.1" },
     { name = "langchain-google-genai", specifier = ">=4.1.2" },
