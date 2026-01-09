@@ -1,7 +1,7 @@
 from langchain.tools import ToolRuntime, tool  # type: ignore
 
 from reviewbot.core.issues import Issue, IssueSeverity
-from reviewbot.infra.issues.in_memory_issue_store import InMemoryIssueStore
+from reviewbot.core.issues.issue_model import IssueModel
 
 
 @tool
@@ -13,7 +13,7 @@ def add_issue(
     end_line: int,
     severity: IssueSeverity,
     status: str,
-    runtime: ToolRuntime,
+    runtime: ToolRuntime,  # type: ignore
 ) -> str:
     """Add an issue to the issue store.
 
@@ -29,7 +29,8 @@ def add_issue(
     Returns:
         string with the id of the added issue
     """
-    issue_store = InMemoryIssueStore(runtime.store)
+    if not runtime.store:
+        raise ValueError("Store not found in runtime")
 
     issue = Issue(
         title=title,
@@ -41,5 +42,7 @@ def add_issue(
         status=status,
     )
 
-    issue_store.add(issue)
+    issue_model = IssueModel.from_domain(issue)
+
+    runtime.store.put(("issues",), str(issue.id), issue_model.model_dump())
     return f"Issue added successfully: {issue.id}"

@@ -56,7 +56,7 @@ def get_reasoning_context(store: BaseStore | None) -> str:
             return ""
 
         history_data = existing.value if hasattr(existing, "value") else existing
-        if not history_data or not history_data.get("items"):
+        if not history_data or not (isinstance(history_data, dict) and history_data.get("items")):
             return ""
 
         reasoning_history = history_data["items"]
@@ -183,25 +183,6 @@ async def run_concurrent_reviews(
     semaphore = asyncio.Semaphore(max_workers)
     task_to_file: dict[asyncio.Future[Any], str] = {}
     start_times: dict[asyncio.Future[Any], float] = {}
-
-    async def review_with_semaphore(file_path: str) -> list[IssueModel]:
-        async with semaphore:
-            task = asyncio.current_task()
-            if task is not None:
-                start_times[task] = time.time()
-            return await asyncio.wait_for(
-                review_single_file_wrapper(
-                    file_path=file_path,
-                    agent=agent,
-                    settings=settings,
-                    quick_scan_agent=quick_scan_agent,
-                    model=model,
-                    tools=tools,
-                    quick_scan_model=quick_scan_model,
-                    quick_scan_tools=quick_scan_tools,
-                ),
-                timeout=task_timeout,
-            )
 
     # Wrapper to track file_path with result
     async def review_with_tracking(file_path: str) -> tuple[str, list[IssueModel]]:
