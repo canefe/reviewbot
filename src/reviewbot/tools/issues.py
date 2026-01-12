@@ -1,3 +1,5 @@
+from typing import Any
+
 from langchain.tools import ToolRuntime, tool  # type: ignore
 
 from reviewbot.core.issues import Issue, IssueSeverity
@@ -13,7 +15,7 @@ def add_issue(
     end_line: int,
     severity: IssueSeverity,
     status: str,
-    runtime: ToolRuntime,  # type: ignore
+    runtime: ToolRuntime[None, dict[str, Any]],
 ) -> str:
     """Add an issue to the issue store.
 

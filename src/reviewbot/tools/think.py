@@ -1,8 +1,10 @@
+from typing import Any
+
 from langchain.tools import ToolRuntime, tool  # type: ignore
 
 
 @tool
-def think(reasoning: str, runtime: ToolRuntime) -> str:  # type: ignore
+def think(reasoning: str, runtime: ToolRuntime[None, dict[str, Any]]) -> str:
     """Record internal reasoning and thought process.
 
     Use this tool to think through problems, plan your approach, or reason about code before taking action.

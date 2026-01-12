@@ -44,7 +44,7 @@ def _get_vector_store(store: Any) -> CodebaseVectorStore:
 
 
 @tool
-def search_codebase(query: str, runtime: ToolRuntime) -> str:
+def search_codebase(query: str, runtime: ToolRuntime[None, dict[str, Any]]) -> str:
     """
     Search the codebase using Unix find + grep.
 
@@ -89,7 +89,7 @@ def search_codebase(query: str, runtime: ToolRuntime) -> str:
 
 @tool
 def search_codebase_semantic_search(
-    query: str, runtime: ToolRuntime, path: str | None = None
+    query: str, runtime: ToolRuntime[None, dict[str, Any]], path: str | None = None
 ) -> str:
     """Search the codebase for the given query. If a path is provided, search the codebase for the given query in the given path.
 
@@ -104,10 +104,13 @@ def search_codebase_semantic_search(
 
 
 @tool
-def read_file(
-    path: str, runtime: ToolRuntime, line_start: int | None = None, line_end: int | None = None
+def read_file_vector(
+    path: str,
+    runtime: ToolRuntime[None, dict[str, Any]],
+    line_start: int | None = None,
+    line_end: int | None = None,
 ) -> str:
-    """Read the file at the given path.
+    """Read the file at the given path using vector store (legacy, prefer read_file tool).
 
     Args:
         path: path to the file to read
