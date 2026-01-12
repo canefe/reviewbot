@@ -3,7 +3,7 @@ from urllib.parse import quote
 
 from rich.console import Console  # type: ignore
 
-from reviewbot.agent.workflow.config import GitLabConfig
+from reviewbot.agent.workflow.config import GitProviderConfig
 from reviewbot.agent.workflow.diff_extract import create_file_position
 from reviewbot.core.issues import IssueModel, IssueSeverity
 from reviewbot.infra.gitlab.diff import FileDiff
@@ -15,7 +15,7 @@ console = Console()
 def handle_file_issues(
     file_path: str,
     issues: list[IssueModel],
-    gitlab_config: GitLabConfig,
+    gitlab_config: GitProviderConfig,
     file_diffs: list[FileDiff],
     diff_refs: dict[str, str],
 ) -> None:
@@ -94,7 +94,7 @@ def handle_file_issues(
             f"{issue.description}\n"
         )
         if issue.suggestion:
-            discussion_body += f"\n{issue.suggestion}\n"
+            discussion_body += f"\n```diff\n{issue.suggestion}\n```\n"
         discussion_body += "\n"
 
     position = build_position()
@@ -123,7 +123,7 @@ def handle_file_issues(
                 f"{issue.description}\n"
             )
             if issue.suggestion:
-                reply_body += f"\n{issue.suggestion}\n"
+                reply_body += f"\n```diff\n{issue.suggestion}\n```\n"
             note_id = reply_to_discussion(
                 discussion_id=discussion_id,
                 body=reply_body,
@@ -156,7 +156,7 @@ def handle_file_issues(
                         f"{issue.description}\n"
                     )
                     if issue.suggestion:
-                        reply_body += f"\n{issue.suggestion}\n"
+                        reply_body += f"\n```diff\n{issue.suggestion}\n```\n"
                     note_id = reply_to_discussion(
                         discussion_id=discussion_id,
                         body=reply_body,
@@ -184,7 +184,7 @@ def handle_file_issues(
 def create_discussion(
     title: str,
     body: str,
-    gitlab_config: GitLabConfig,
+    gitlab_config: GitProviderConfig,
     position: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     """
@@ -204,10 +204,10 @@ def create_discussion(
 
     # post_discussion returns (discussion_id, note_id), we only need discussion_id
     discussion_id, note_id = post_discussion(
-        api_v4=gitlab_config.api_v4,
-        token=gitlab_config.token,
-        project_id=gitlab_config.project_id,
-        mr_iid=gitlab_config.mr_iid,
+        api_v4=gitlab_config.get_api_base_url(),
+        token=gitlab_config.token.get_secret_value(),
+        project_id=gitlab_config.get_project_identifier(),
+        mr_iid=gitlab_config.get_pr_identifier(),
         body=body,
         position=position,
     )
@@ -218,7 +218,7 @@ def create_discussion(
 def reply_to_discussion(
     discussion_id: str,
     body: str,
-    gitlab_config: GitLabConfig,
+    gitlab_config: GitProviderConfig,
 ) -> str | None:
     """
     Reply to an existing discussion.
@@ -229,10 +229,10 @@ def reply_to_discussion(
         gitlab_config: GitLab API configuration
     """
     return post_discussion_reply(
-        api_v4=gitlab_config.api_v4,
-        token=gitlab_config.token,
-        project_id=gitlab_config.project_id,
-        merge_request_id=gitlab_config.mr_iid,
+        api_v4=gitlab_config.get_api_base_url(),
+        token=gitlab_config.token.get_secret_value(),
+        project_id=gitlab_config.get_project_identifier(),
+        merge_request_id=gitlab_config.get_pr_identifier(),
         discussion_id=discussion_id,
         body=body,
     )

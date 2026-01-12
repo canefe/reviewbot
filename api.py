@@ -1,11 +1,14 @@
+import asyncio
 import os
+import re
+from typing import Any
 
 import dotenv
 import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from src.reviewbot.agent.workflow import work_agent
+from src.reviewbot.agent.workflow import work_agent  # type: ignore
 from src.reviewbot.agent.workflow.gitlab_notes import post_mr_note
 from src.reviewbot.infra.config.env import load_env
 
@@ -40,9 +43,9 @@ def get_pipeline_status(project_id: str, pipeline_id: int) -> str:
     return r.json()["status"]
 
 
-def mr_has_conflicts(mr: dict) -> bool:
+def mr_has_conflicts(mr: Any) -> bool:
     # GitLab MR payload includes this
-    return mr.get("detailed_merge_status") == "conflict"
+    return mr and mr["detailed_merge_status"] == "conflict"
 
 
 def pipeline_passed(project_id: str, pipeline_id: int) -> bool:
@@ -81,9 +84,12 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
             return JSONResponse({"ignored": "bot note"})
 
         text = note.get("note", "")
-        # pattern = rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
-        # if not re.search(pattern, text):
-        #     return JSONResponse({"ignored": "no /review command"})
+        if BOT_USERNAME and text.strip() != "/reviewbot review":
+            pattern = (
+                rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
+            )
+            if not re.search(pattern, text):
+                return JSONResponse({"ignored": "no /review command"})
 
         if text.strip() != "/reviewbot review":
             return JSONResponse({"ignored": "not a review command"})
@@ -92,15 +98,22 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         if not mr:
             return JSONResponse({"ignored": "not an MR note"})
 
-        project_id = payload["project"]["id"]
-        mr_iid = mr["iid"]
+        project_id = str(payload["project"]["id"])
+        mr_iid = str(mr["iid"])
 
         config = load_env()
-        background_tasks.add_task(
-            work_agent,
-            config,
-            project_id,
-            mr_iid,
+        thread_id = f"{project_id}:{mr_iid}"
+        asyncio.create_task(
+            work_agent.ainvoke(  # type: ignore
+                {
+                    "config": config,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid,
+                },
+                config={
+                    "configurable": {"thread_id": thread_id},
+                },
+            )
         )
 
         return JSONResponse({"status": "manual review triggered"})
@@ -113,7 +126,7 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         mr = payload.get("merge_request")
         detailed_status = attrs.get("detailed_status")
 
-        project_id = payload["project"]["id"]
+        project_id = str(payload["project"]["id"])
 
         if detailed_status not in ["passed", "failed"]:
             return JSONResponse({"ignored": "pipeline is not in a final state"})
@@ -121,7 +134,7 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
         if not mr:
             return JSONResponse({"ignored": "not an MR pipeline"})
 
-        mr_iid = mr["iid"]
+        mr_iid = str(mr["iid"])
 
         if detailed_status != "passed":
             post_mr_note(
@@ -145,11 +158,18 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
             return JSONResponse({"ignored": "merge conflicts present"})
 
         config = load_env()
-        background_tasks.add_task(
-            work_agent,
-            config,
-            project_id,
-            mr_iid,
+        thread_id = f"{project_id}:{mr_iid}"
+        asyncio.create_task(
+            work_agent.ainvoke(  # type: ignore
+                {
+                    "config": config,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid,
+                },
+                config={
+                    "configurable": {"thread_id": thread_id},
+                },
+            )
         )
 
         return JSONResponse({"status": "auto review triggered"})

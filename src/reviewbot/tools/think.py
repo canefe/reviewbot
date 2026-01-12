@@ -1,10 +1,10 @@
-from langchain.tools import tool  # type: ignore
+from typing import Any
 
-from reviewbot.context import store_manager_ctx
+from langchain.tools import ToolRuntime, tool  # type: ignore
 
 
 @tool
-def think(reasoning: str) -> str:
+def think(reasoning: str, runtime: ToolRuntime[None, dict[str, Any]]) -> str:
     """Record internal reasoning and thought process.
 
     Use this tool to think through problems, plan your approach, or reason about code before taking action.
@@ -29,17 +29,21 @@ def think(reasoning: str) -> str:
         - "This looks like a potential security issue - user input is being directly
            concatenated into a SQL query. I should flag this as high severity."
     """
-    context = store_manager_ctx.get()
-    issue_store = context.get("issue_store")
+    if not runtime.store:
+        raise ValueError("Store not found in runtime")
 
-    if not issue_store:
-        return "Context not available for storing reasoning."
+    # Store reasoning in langgraph store
+    NS = ("reasoning",)
+    existing = runtime.store.get(NS, "history")
 
-    # Store reasoning in the issue store's metadata
-    if not hasattr(issue_store, "_reasoning_history"):
-        issue_store._reasoning_history = []
+    if existing is None:
+        history: dict[str, list[str]] = {"items": []}
+    else:
+        history = existing.value
 
-    issue_store._reasoning_history.append(reasoning)
+    history["items"].append(reasoning)
+    runtime.store.put(NS, "history", history)
+
     print("Reasoned:")
     print(reasoning)
     return f"Reasoning recorded: {reasoning[:100]}{'...' if len(reasoning) > 100 else ''}"

@@ -1,9 +1,15 @@
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.func import task  # type: ignore
 from rich.console import Console  # type: ignore
 
+from reviewbot.agent.workflow.config import GitProviderConfig
 from reviewbot.core.agent import Agent
 from reviewbot.core.issues import Issue, IssueSeverity
+from reviewbot.core.reviews.review import Acknowledgment
+from reviewbot.core.reviews.review_model import ReviewSummary
 from reviewbot.infra.gitlab.diff import FileDiff
 from reviewbot.infra.gitlab.note import (
     get_all_discussions,
@@ -12,17 +18,32 @@ from reviewbot.infra.gitlab.note import (
     update_discussion_note,
 )
 
+
+class AcknowledgmentResult(NamedTuple):
+    discussion_id: str
+    note_id: str
+
+
 console = Console()
 
 
+@task
 def post_review_acknowledgment(
-    api_v4: str,
-    token: str,
-    project_id: str,
-    mr_iid: str,
-    agent: Agent,
-    diffs: list[FileDiff],
-) -> tuple[str, str] | None:
+    *, gitlab: GitProviderConfig, diffs: list[FileDiff], model: BaseChatModel
+) -> AcknowledgmentResult | None:
+    """
+    Posts an initial acknowledgment discussion for the MR review.
+
+    Reads:
+      - CodebaseState from store
+
+    Writes:
+      - acknowledgment ids (returned)
+
+    Returns:
+      AcknowledgmentResult if created, otherwise None
+    """
+
     """
     Post a surface-level summary acknowledging the review is starting.
     Creates a discussion so it can be updated later.
@@ -41,6 +62,10 @@ def post_review_acknowledgment(
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    api_v4 = gitlab.get_api_base_url()
+    token = gitlab.token.get_secret_value()
+    project_id = gitlab.get_project_identifier()
+    mr_iid = gitlab.get_pr_identifier()
     # Check if an acknowledgment already exists
     try:
         discussions = get_all_discussions(
@@ -57,7 +82,7 @@ def post_review_acknowledgment(
         )
 
         # Find ALL "Starting" acknowledgments, then pick the most recent one
-        found_acknowledgments = []
+        found_acknowledgments: list[Acknowledgment] = []
         for discussion in discussions:
             notes = discussion.get("notes", [])
             for note in notes:
@@ -69,27 +94,27 @@ def post_review_acknowledgment(
                     created_at = note.get("created_at", "")
                     if discussion_id and note_id:
                         found_acknowledgments.append(
-                            {
-                                "discussion_id": str(discussion_id),
-                                "note_id": str(note_id),
-                                "created_at": created_at,
-                            }
+                            Acknowledgment(
+                                discussion_id=str(discussion_id),
+                                note_id=str(note_id),
+                                created_at=created_at,
+                            )
                         )
 
         # If we found any in-progress acknowledgments, use the most recent one
         if found_acknowledgments:
             # Sort by created_at timestamp (most recent first)
-            found_acknowledgments.sort(key=lambda x: x["created_at"], reverse=True)
+            found_acknowledgments.sort(key=lambda x: x.created_at, reverse=True)
             most_recent = found_acknowledgments[0]
             console.print(
                 f"[dim]Found {len(found_acknowledgments)} in-progress review(s), reusing most recent[/dim]"
             )
-            return (most_recent["discussion_id"], most_recent["note_id"])
+            return AcknowledgmentResult(most_recent.discussion_id, most_recent.note_id)
 
         # No in-progress reviews found - will create a new acknowledgment
         console.print("[dim]No in-progress reviews found, will create new acknowledgment[/dim]")
     except Exception as e:
-        console.print(f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Could not check for existing acknowledgment: {e}[/yellow]")
         # Continue anyway - better to post a duplicate than miss it
 
     # Get list of files being reviewed
@@ -121,10 +146,12 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
 
     try:
         # Get response with no tool calls allowed
-        from reviewbot.agent.tasks.core import ToolCallerSettings, tool_caller
+        from ido_agents.agents.ido_agent import create_ido_agent
+        from ido_agents.agents.tool_runner import ToolCallerSettings
 
-        summary_settings = ToolCallerSettings(max_tool_calls=0, max_iterations=1)
-        summary = tool_caller(agent, messages, summary_settings)
+        summary_settings = ToolCallerSettings(max_tool_calls=0)
+        ido_agent = create_ido_agent(model=model, tools=[])
+        summary = ido_agent.with_tool_caller(summary_settings).invoke(messages)
 
         # Post as a discussion (so we can update it later)
         acknowledgment_body = f"""<img src="https://img.shields.io/badge/Code_Review-Starting-blue?style=flat-square" />
@@ -145,16 +172,16 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         )
 
         if not note_id:
-            console.print("[yellow]⚠ Discussion created but no note ID returned[/yellow]")
+            console.print("[yellow]Discussion created but no note ID returned[/yellow]")
             return None
 
         console.print(
             f"[green]✓ Posted review acknowledgment (discussion: {discussion_id}, note: {note_id})[/green]"
         )
-        return (str(discussion_id), str(note_id))
+        return AcknowledgmentResult(str(discussion_id), str(note_id))
 
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Failed to post acknowledgment: {e}[/yellow]")
         # Don't fail the whole review if acknowledgment fails
         return None
 
@@ -170,6 +197,8 @@ def update_review_summary(
     diffs: list[FileDiff],
     diff_refs: dict[str, str],
     agent: Agent,
+    model: BaseChatModel | None = None,
+    tools: list[Any] | None = None,
 ) -> None:
     """
     Update the acknowledgment note with a summary of the review results.
@@ -206,7 +235,7 @@ def update_review_summary(
     files_with_issues = len(issues_by_file)
 
     # Prepare issue details for LLM
-    issues_summary = []
+    issues_summary: list[str] = []
     for issue in issues:
         issues_summary.append(
             f"- **{issue.severity.value.upper()}** in `{issue.file_path}` (lines {issue.start_line}-{issue.end_line}): {issue.description}"
@@ -216,7 +245,7 @@ def update_review_summary(
 
     # Generate LLM summary with reasoning
     try:
-        from reviewbot.agent.tasks.core import ToolCallerSettings, tool_caller
+        from ido_agents.agents.ido_agent import create_ido_agent
 
         messages = [
             SystemMessage(
@@ -262,11 +291,16 @@ paragraph2
             ),
         ]
 
-        summary_settings = ToolCallerSettings(max_tool_calls=0, max_iterations=1)
-        llm_summary = tool_caller(agent, messages, summary_settings)
+        if model is None:
+            raise ValueError("model parameter is required for ido-agents migration")
+
+        ido_agent = create_ido_agent(model=model, tools=tools or [])
+        llm_summary = ido_agent.with_structured_output(ReviewSummary).invoke(messages)
+
+        llm_summary = str(llm_summary)
 
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to generate LLM summary: {e}[/yellow]")
+        console.print(f"[yellow]Failed to generate LLM summary: {e}[/yellow]")
         llm_summary = "Review completed successfully."
 
     # Build final summary combining statistics and LLM reasoning
@@ -298,9 +332,6 @@ paragraph2
 
         if issues:
             summary_parts.append("---\n\n")
-            issues_by_file: dict[str, list[Issue]] = {}
-            for issue in issues:
-                issues_by_file.setdefault(issue.file_path, []).append(issue)
 
             severity_badge_colors = {
                 IssueSeverity.HIGH: "red",
@@ -360,7 +391,7 @@ paragraph2
         )
         console.print("[green]✓ Updated review acknowledgment with summary[/green]")
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to update acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Failed to update acknowledgment: {e}[/yellow]")
         import traceback
 
         traceback.print_exc()

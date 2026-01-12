@@ -11,3 +11,10 @@ class Review:
     commit: str = ""
     issues: list[Issue] = field(default_factory=list)
     summary: str = ""
+
+
+@dataclass(frozen=True)
+class Acknowledgment:
+    discussion_id: str
+    note_id: str
+    created_at: str

@@ -2,17 +2,49 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from pathlib import Path
+from typing import Any
 
-from langchain.tools import tool  # type: ignore
+from langchain.tools import ToolRuntime, tool  # type: ignore
 from rich.console import Console
 
-from reviewbot.context import store_manager_ctx
+from reviewbot.agent.workflow.state import CodebaseState
+from reviewbot.infra.embeddings.openai import CodebaseVectorStore
 
 console = Console()
 
+# Cache for the vector store to avoid rebuilding
+_vector_store_cache: CodebaseVectorStore | None = None
+
+
+def _get_codebase_state(store: Any) -> CodebaseState:
+    """Helper to get CodebaseState from store."""
+    NS = ("codebase",)
+    raw = store.get(NS, "state")
+    if not raw:
+        raise ValueError("Codebase state not found in store")
+    return CodebaseState.model_validate(raw.value)
+
+
+def _get_vector_store(store: Any) -> CodebaseVectorStore:
+    """Get or create vector store for semantic search."""
+    global _vector_store_cache
+
+    codebase = _get_codebase_state(store)
+    repo_root = Path(codebase.repo_root)
+    repo_name = codebase.repo_name
+
+    # Create new instance if not cached or repo changed
+    if _vector_store_cache is None or _vector_store_cache.repo_root != repo_root:
+        _vector_store_cache = CodebaseVectorStore(repo_root, repo_name)
+        if not _vector_store_cache.load():
+            _vector_store_cache.build()
+
+    return _vector_store_cache
+
 
 @tool
-def search_codebase(query: str) -> str:
+def search_codebase(query: str, runtime: ToolRuntime[None, dict[str, Any]]) -> str:
     """
     Search the codebase using Unix find + grep.
 
@@ -21,22 +53,15 @@ def search_codebase(query: str) -> str:
     Returns:
         grep-style matches: file:line:content
     """
-    # path is relative to the repo root
-    context = store_manager_ctx.get()
-    store = context.get("store_manager")
-    if not store:
-        raise ValueError("Store manager not found")
-
-    repo_root = store.get_store().repo_root.resolve()
-
-    base = repo_root  # or a validated subpath if you support `path`
+    codebase = _get_codebase_state(runtime.store)
+    repo_root = Path(codebase.repo_root).resolve()
 
     max_lines = 200
     cmd = [
         "bash",
         "-lc",
         (
-            f"find {shlex.quote(base.as_posix())} -type f "
+            f"find {shlex.quote(repo_root.as_posix())} -type f "
             f"! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/.venv/*' "
             f"-print0 | "
             f"xargs -0 grep -nH --color=never -I {shlex.quote(query)} | "
@@ -63,7 +88,9 @@ def search_codebase(query: str) -> str:
 
 
 @tool
-def search_codebase_semantic_search(query: str, path: str | None = None) -> str:
+def search_codebase_semantic_search(
+    query: str, runtime: ToolRuntime[None, dict[str, Any]], path: str | None = None
+) -> str:
     """Search the codebase for the given query. If a path is provided, search the codebase for the given query in the given path.
 
     Args:
@@ -72,21 +99,18 @@ def search_codebase_semantic_search(query: str, path: str | None = None) -> str:
     Returns:
         string with the results of the search
     """
-    context = store_manager_ctx.get()
-    store = context.get("store_manager")
-    if not store:
-        raise ValueError("Store manager not found")
-
-    store = store.get_store()
-    if not store:
-        raise ValueError("Store not found")
-
-    return store.search(query, top_k=5, path=path)  # type: ignore
+    vector_store = _get_vector_store(runtime.store)
+    return vector_store.search(query, top_k=5, path=path)  # type: ignore
 
 
 @tool
-def read_file(path: str, line_start: int | None = None, line_end: int | None = None) -> str:
-    """Read the file at the given path.
+def read_file_vector(
+    path: str,
+    runtime: ToolRuntime[None, dict[str, Any]],
+    line_start: int | None = None,
+    line_end: int | None = None,
+) -> str:
+    """Read the file at the given path using vector store (legacy, prefer read_file tool).
 
     Args:
         path: path to the file to read
@@ -95,14 +119,5 @@ def read_file(path: str, line_start: int | None = None, line_end: int | None = N
     Returns:
         string with the contents of the file
     """
-    context = store_manager_ctx.get()
-    store = context.get("store_manager")
-    if not store:
-        raise ValueError("Store manager not found")
-
-    store = store.get_store()
-    if not store:
-        raise ValueError("Store not found")
-
-    result = store.read_file(path, line_start=line_start, line_end=line_end)
-    return result
+    vector_store = _get_vector_store(runtime.store)
+    return vector_store.read_file(path, line_start=line_start, line_end=line_end)
