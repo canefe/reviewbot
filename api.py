@@ -1,12 +1,14 @@
 import asyncio
 import os
+import re
+from typing import Any
 
 import dotenv
 import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from src.reviewbot.agent.workflow import work_agent
+from src.reviewbot.agent.workflow import work_agent  # type: ignore
 from src.reviewbot.agent.workflow.gitlab_notes import post_mr_note
 from src.reviewbot.infra.config.env import load_env
 
@@ -41,9 +43,9 @@ def get_pipeline_status(project_id: str, pipeline_id: int) -> str:
     return r.json()["status"]
 
 
-def mr_has_conflicts(mr: dict) -> bool:
+def mr_has_conflicts(mr: Any) -> bool:
     # GitLab MR payload includes this
-    return mr.get("detailed_merge_status") == "conflict"
+    return mr and mr["detailed_merge_status"] == "conflict"
 
 
 def pipeline_passed(project_id: str, pipeline_id: int) -> bool:
@@ -82,9 +84,12 @@ async def gitlab_webhook(req: Request, background_tasks: BackgroundTasks):
             return JSONResponse({"ignored": "bot note"})
 
         text = note.get("note", "")
-        # pattern = rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
-        # if not re.search(pattern, text):
-        #     return JSONResponse({"ignored": "no /review command"})
+        if BOT_USERNAME and text.strip() != "/reviewbot review":
+            pattern = (
+                rf"(?:/review\b.*@{re.escape(BOT_USERNAME)}|@{re.escape(BOT_USERNAME)}.*?/review\b)"
+            )
+            if not re.search(pattern, text):
+                return JSONResponse({"ignored": "no /review command"})
 
         if text.strip() != "/reviewbot review":
             return JSONResponse({"ignored": "not a review command"})
