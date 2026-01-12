@@ -114,7 +114,7 @@ def post_review_acknowledgment(
         # No in-progress reviews found - will create a new acknowledgment
         console.print("[dim]No in-progress reviews found, will create new acknowledgment[/dim]")
     except Exception as e:
-        console.print(f"[yellow]⚠ Could not check for existing acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Could not check for existing acknowledgment: {e}[/yellow]")
         # Continue anyway - better to post a duplicate than miss it
 
     # Get list of files being reviewed
@@ -172,7 +172,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         )
 
         if not note_id:
-            console.print("[yellow]⚠ Discussion created but no note ID returned[/yellow]")
+            console.print("[yellow]Discussion created but no note ID returned[/yellow]")
             return None
 
         console.print(
@@ -181,7 +181,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         return AcknowledgmentResult(str(discussion_id), str(note_id))
 
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to post acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Failed to post acknowledgment: {e}[/yellow]")
         # Don't fail the whole review if acknowledgment fails
         return None
 
@@ -300,7 +300,7 @@ paragraph2
         llm_summary = str(llm_summary)
 
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to generate LLM summary: {e}[/yellow]")
+        console.print(f"[yellow]Failed to generate LLM summary: {e}[/yellow]")
         llm_summary = "Review completed successfully."
 
     # Build final summary combining statistics and LLM reasoning
@@ -391,7 +391,7 @@ paragraph2
         )
         console.print("[green]✓ Updated review acknowledgment with summary[/green]")
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to update acknowledgment: {e}[/yellow]")
+        console.print(f"[yellow]Failed to update acknowledgment: {e}[/yellow]")
         import traceback
 
         traceback.print_exc()

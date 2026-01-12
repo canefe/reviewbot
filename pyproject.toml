@@ -54,6 +54,10 @@ quote-style = "double"
 indent-style = "space"
 
 [dependency-groups]
-dev = ["ruff>=0.8.6", "ty>=0.0.4"]
+dev = [
+    "pyright>=1.1.408",
+    "ruff>=0.8.6",
+    "ty>=0.0.4",
+]
 [project.optional-dependencies]
 examples = ["fastapi"]

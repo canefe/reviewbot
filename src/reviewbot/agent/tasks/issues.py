@@ -84,6 +84,7 @@ async def identify_issues(
     tools: list[Any] | None = None,
     quick_scan_model: Any | None = None,
     quick_scan_tools: list[Any] | None = None,
+    acknowledgment_info: tuple[str, str, Any] | None = None,
 ) -> list[IssueModel]:
     """
     Identify issues in the codebase using concurrent agents per file.
@@ -112,9 +113,61 @@ async def identify_issues(
         tools=tools,
         quick_scan_model=quick_scan_model,
         quick_scan_tools=quick_scan_tools,
+        acknowledgment_info=acknowledgment_info,
     )
 
     return all_issues
+
+
+def format_progress_message(
+    all_files: list[str],
+    completed_files: set[str],
+    in_progress_files: dict[asyncio.Future[Any], str],
+    max_workers: int,
+) -> str:
+    """Format a progress message for the acknowledgment note."""
+    total = len(all_files)
+    completed = len(completed_files)
+    in_progress = len(in_progress_files)
+    pending = total - completed - in_progress
+
+    # Progress badge
+    progress_badge = '<img src="https://img.shields.io/badge/Code_Review-In_Progress-orange?style=flat-square" />'
+    progress_text = f"{completed}/{total} files reviewed"
+
+    # Build message
+    lines = [progress_badge, "", f"**Review Progress: {progress_text}**", ""]
+
+    # Worker status
+    lines.append(f"**Active Workers ({in_progress}/{max_workers}):**")
+    if in_progress_files:
+        for task, file_path in in_progress_files.items():
+            if not task.done():
+                lines.append(f"- Reviewing: `{file_path}`")
+    else:
+        lines.append("- (All workers idle)")
+
+    lines.append("")
+
+    # Completed files
+    if completed_files:
+        lines.append(f"**Completed ({completed}):**")
+        for file_path in sorted(completed_files):
+            lines.append(f"- `{file_path}`")
+        lines.append("")
+
+    # Pending files
+    if pending > 0:
+        pending_list = [
+            f for f in all_files if f not in completed_files and f not in in_progress_files.values()
+        ]
+        lines.append(f"**Pending ({pending}):**")
+        for file_path in pending_list[:5]:  # Show first 5
+            lines.append(f"- `{file_path}`")
+        if pending > 5:
+            lines.append(f"- ... and {pending - 5} more")
+
+    return "\n".join(lines)
 
 
 async def monitor_progress(
@@ -122,14 +175,23 @@ async def monitor_progress(
     start_times: dict[asyncio.Future[Any], float],
     stop_event: asyncio.Event,
     task_timeout: int = 300,  # 5 minutes per task
+    acknowledgment_info: tuple[str, str, Any] | None = None,
+    all_files: list[str] | None = None,
+    completed_files: set[str] | None = None,
+    max_workers: int = 3,
 ):
     """
-    Monitor coroutine that logs the status of ongoing tasks.
+    Monitor coroutine that logs the status of ongoing tasks and updates acknowledgment.
     """
+    update_interval = 10  # Update every 10 seconds
+    last_update = time.time()
+
     while not stop_event.is_set():
-        await asyncio.sleep(10)  # Check every 10 seconds
+        await asyncio.sleep(5)  # Check every 5 seconds
 
         current_time = time.time()
+
+        # Log status to console
         for io_task, file_path in task_to_file.items():
             if not io_task.done():
                 start_time = start_times.get(io_task)
@@ -140,10 +202,31 @@ async def monitor_progress(
                     console.print(
                         f"[red]TIMEOUT WARNING: {file_path} has been running for {elapsed:.0f}s[/red]"
                     )
-                else:
-                    console.print(
-                        f"[yellow]Still processing: {file_path} ({elapsed:.0f}s elapsed)[/yellow]"
+
+        # Update acknowledgment note every 10 seconds
+        if acknowledgment_info and all_files and completed_files is not None:
+            if current_time - last_update >= update_interval:
+                try:
+                    discussion_id, note_id, gitlab_config = acknowledgment_info
+                    progress_message = format_progress_message(
+                        all_files, completed_files, task_to_file, max_workers
                     )
+
+                    # Import here to avoid circular dependency
+                    from reviewbot.infra.gitlab.note import async_update_discussion_note
+
+                    await async_update_discussion_note(
+                        api_v4=gitlab_config.get_api_base_url(),
+                        token=gitlab_config.token.get_secret_value(),
+                        project_id=gitlab_config.get_project_identifier(),
+                        mr_iid=gitlab_config.get_pr_identifier(),
+                        discussion_id=discussion_id,
+                        note_id=note_id,
+                        body=progress_message,
+                    )
+                    last_update = current_time
+                except Exception as e:
+                    console.print(f"[yellow]Failed to update progress note: {e}[/yellow]")
 
 
 async def run_concurrent_reviews(
@@ -158,6 +241,7 @@ async def run_concurrent_reviews(
     tools: list[Any] | None = None,
     quick_scan_model: Any | None = None,
     quick_scan_tools: list[Any] | None = None,
+    acknowledgment_info: tuple[str, str, Any] | None = None,
 ) -> list[IssueModel]:
     """
     Run concurrent reviews of all diff files with monitoring.
@@ -179,6 +263,7 @@ async def run_concurrent_reviews(
     console.print(f"[dim]Files: {', '.join(diff_file_paths)}[/dim]\n")
 
     all_issues: list[IssueModel] = []
+    completed_files: set[str] = set()
 
     semaphore = asyncio.Semaphore(max_workers)
     task_to_file: dict[asyncio.Future[Any], str] = {}
@@ -212,7 +297,16 @@ async def run_concurrent_reviews(
 
     stop_monitor = asyncio.Event()
     monitor_task = asyncio.create_task(
-        monitor_progress(task_to_file, start_times, stop_monitor, task_timeout)
+        monitor_progress(
+            task_to_file,
+            start_times,
+            stop_monitor,
+            task_timeout,
+            acknowledgment_info=acknowledgment_info,
+            all_files=diff_file_paths,
+            completed_files=completed_files,
+            max_workers=max_workers,
+        )
     )
 
     try:
@@ -220,6 +314,7 @@ async def run_concurrent_reviews(
             try:
                 file_path, issues = await coro
                 all_issues.extend(issues)
+                completed_files.add(file_path)
                 console.print(f"[green]✓[/green] Processed {file_path}: {len(issues)} issues")
 
                 # Call the callback if provided, allowing immediate discussion creation
@@ -412,91 +507,92 @@ async def review_single_file(
             ido_agent = create_ido_agent(model=model, tools=tools or [])
             await ido_agent.with_tool_caller(think_settings).ainvoke(think_messages)
     except Exception as e:
-        console.print(f"[yellow]⚠ Failed to record reasoning for {file_path}: {e}[/yellow]")
+        console.print(f"[yellow]Failed to record reasoning for {file_path}: {e}[/yellow]")
 
     messages: list[BaseMessage] = [
         SystemMessage(
-            content=f"""You are a senior code reviewer analyzing a specific file change.
+            content=f"""You are a senior code reviewer analyzing code changes for bugs, security issues, and logic errors.
+
+AVAILABLE TOOLS:
+- `think()` - Record your internal reasoning (use this to analyze the code)
+- `get_diff(file_path)` - Get the diff for the file being reviewed
+- `read_file(file_path)` - Read the COMPLETE file to see full context beyond the diff
+- `read_file(file_path, line_start, line_end)` - Read specific line ranges
+- `ls_dir(dir_path)` - List contents of a directory to explore the codebase structure
+
+IMPORTANT: CONTEXT LIMITATIONS
+The diff shows only the changed lines, not the full file. When you need to verify something outside the diff (like imports, variable declarations, or function definitions), use `read_file()` to see the complete context.
+
+Use `read_file()` when:
+- You suspect undefined variables/imports but they might exist elsewhere in the file
+- You need to understand surrounding code to assess impact
+- The change references code not shown in the diff
+
+HANDLING NEW FILES:
+If `read_file()` returns an error stating the file is NEW:
+- This file doesn't exist yet in the repository
+- You can only see what's in the diff
+- Be lenient about imports/definitions (assume they're complete in the actual PR)
+- Focus on logic bugs, security issues, and clear errors in the visible code
 
 REASONING TOOL:
-- You have access to a `think()` tool for recording your internal reasoning
-- Use it to plan your approach, analyze patterns, or reason about potential issues
-- Your reasoning is stored and will be available in subsequent requests
-- This helps maintain context and improves review quality{reasoning_context}
- - During deep reviews, you MUST call think() before producing your JSON output
+- Use `think()` to record your analysis process{reasoning_context}
+- Call `think()` before producing your final output
+- Document your reasoning about each potential issue
 
-Your task: Review ONLY the file '{file_path}' from the merge request diff.
+Your task: Review the file '{file_path}' and identify actionable issues.
 
-IMPORTANT GUIDELINES:
-- Be CONSERVATIVE: Only report real, actionable issues - not stylistic preferences or nitpicks
-- If there are NO legitimate issues, return an empty array: []
+WHAT TO REPORT:
+- **Critical bugs** - Code that will crash, throw errors, or produce incorrect results
+- **Security vulnerabilities** - SQL injection, XSS, authentication bypass, etc.
+- **Logic errors** - Incorrect algorithms, wrong conditions, broken business logic
+- **Data corruption risks** - Code that could corrupt data or cause inconsistent state
+- **Performance problems** - Clear bottlenecks like O(n²) where O(n) is possible
+- **Breaking changes** - Changes that break existing APIs or functionality
+
+WHAT NOT TO REPORT:
+- Code style preferences (naming, formatting, organization)
+- Missing documentation or comments
+- Minor refactoring suggestions that don't fix bugs
+- Hypothetical edge cases without evidence they're relevant
+- Issues based on assumptions about the environment (e.g., "X might not be installed")
+- Version numbers or package versions you're unfamiliar with (they may be newer than your training)
+- Import paths or APIs you don't recognize (they may have changed since your training)
+
+IMPORTANT:
 - Do NOT invent issues to justify the review
-- Only report issues with clear negative impact (bugs, security risks, performance problems, logic errors)
-- Avoid reporting issues about code style, formatting, or personal preferences unless they violate critical standards
-- Medium/High severity issues should be reserved for actual bugs, security vulnerabilities, or broken functionality
-- The `description` field MUST include a short plain-text explanation (1-3 sentences).
+- Only report issues with direct evidence in the code shown
 
-CRITICAL - KNOWLEDGE CUTOFF AWARENESS:
-Your training data has a cutoff date. The code you're reviewing may use:
-- Package versions released AFTER your training (e.g., v2, v3 of libraries)
-- Language versions you don't know about (e.g., Go 1.23+, Python 3.13+)
-- Import paths that have changed since your training
-- APIs that have been updated
-
-DO NOT FLAG as issues:
-Version numbers (e.g., "Go 1.25 doesn't exist" - it might now!)
-Import paths you don't recognize (e.g., "should be v1 not v2" - v2 might be correct!)
-Package versions (e.g., "mongo-driver/v2" - newer versions exist!)
-Language features you don't recognize (they might be new)
-API methods you don't know (they might have been added)
-
-ONLY flag version/import issues if:
-There's an obvious typo (e.g., "monggo" instead of "mongo")
-The code itself shows an error (e.g., import fails in the diff)
-There's a clear pattern mismatch (e.g., mixing v1 and v2 imports inconsistently)
-
-When in doubt about versions/imports: ASSUME THE DEVELOPER IS CORRECT and skip it.
+SEVERITY GUIDELINES:
+- **HIGH**: Crashes, security vulnerabilities, data corruption, broken functionality
+- **MEDIUM**: Logic errors, performance issues, likely bugs in edge cases
+- **LOW**: Minor issues that could cause problems in rare scenarios
 
 SUGGESTIONS:
-- When a fix is simple, provide a "suggestion" field.
-- **GitLab Syntax Requirement**: You must format the suggestion using relative line offsets based on your `start_line` and `end_line`.
-- **The Formula**:
-1. The header MUST be: ```diff
-- **Content**: The suggestion must include the full corrected code for every line from `start_line` to `end_line`.
-- **Indentation**: You MUST preserve the exact leading whitespace of the original code.
-- Format:
-```diff
-[CORRECTED CODE BLOCK]
-```
+When you identify an issue with a clear fix, provide a `suggestion` field with the corrected code.
+Format as a diff showing the old and new code:
+- Lines starting with `-` show old code to remove
+- Lines starting with `+` show new code to add
+- Preserve exact indentation from the original
 
-Focus ONLY on:
-1. **Critical bugs** - Code that will crash or produce incorrect results
-2. **Security vulnerabilities** - Actual exploitable security issues (SQL injection, XSS, etc.)
-3. **Logic errors** - Incorrect business logic or algorithm implementation
-4. **Performance problems** - Clear performance bottlenecks (O(n²) where O(n) is possible, memory leaks, etc.)
-5. **Breaking changes** - Code that breaks existing functionality or APIs
-
-DO NOT report:
-- Stylistic preferences (variable naming, code organization) unless they severely impact readability
-- Missing comments or documentation
-- Minor code smells that don't impact functionality
-- Hypothetical edge cases without evidence they're relevant
-- Refactoring suggestions unless current code is broken
-- Version numbers, import paths, or package versions you're unfamiliar with
-- Missing imports
+OUTPUT:
+Return a JSON array of issues. If no issues are found, return an empty array: []
+Each issue must have: title, description, severity, file_path, start_line, end_line, and optionally suggestion.
 
 Be specific and reference exact line numbers from the diff."""
         ),
         HumanMessage(
             content=f"""Review the merge request diff for the file: {file_path}
 
-INSTRUCTIONS:
-1. Use the get_diff("{file_path}") tool ONCE to retrieve the diff
-2. Review the diff content directly - read other files if absolutely necessary for more context
-3. Return your findings as a list of issues
+WORKFLOW:
+1. Use `get_diff("{file_path}")` to get the diff
+2. Analyze the changes for bugs, security issues, and logic errors
+3. If you need context beyond the diff (imports, variable declarations, surrounding code):
+   - Use `read_file("{file_path}")` to see the complete file
+4. Use `think()` to document your reasoning and analysis
+5. Return your findings as a list of issues (or empty list if none)
 
-Analyze ONLY this file's diff. If you find legitimate issues, return them.
-If there are no real issues, return an empty list.
+Find the real bugs - that's what matters most!
 """
         ),
     ]
@@ -565,16 +661,32 @@ async def validate_issues_for_file(
     messages: list[BaseMessage] = [
         SystemMessage(
             content=(
-                "You are an issue checker. Validate each issue strictly against the diff.\n"
-                "Keep an issue ONLY if the diff provides direct evidence that the issue is real.\n"
-                "Do NOT create new issues and do NOT modify fields. For any removed issue, provide\n"
-                "a short reason grounded in the diff. Do not use tools."
+                "You are an issue validator. Your job is to remove FALSE POSITIVES while keeping real bugs.\n\n"
+                "AVAILABLE TOOLS:\n"
+                "- `read_file(file_path)` - Read the complete file to verify issues\n"
+                "- `ls_dir(dir_path)` - List directory contents to verify file structure\n\n"
+                "WHAT TO REMOVE (false positives):\n"
+                "- 'Variable X undefined' - when X is actually defined elsewhere in the file\n"
+                "- 'Import Y missing' - when Y exists at the top of the file\n"
+                "- 'Function Z not declared' - when Z is defined in the complete file\n\n"
+                "WHAT TO KEEP (real issues):\n"
+                "- Logic errors - wrong conditions, broken algorithms, incorrect business logic\n"
+                "- Security vulnerabilities - SQL injection, XSS, auth bypass, etc.\n"
+                "- Bugs that will crash or produce wrong results\n"
+                "- Data corruption risks\n"
+                "- Performance problems\n\n"
+                "RULES:\n"
+                "- KEEP issues about logic, bugs, security, and functionality\n"
+                "- ONLY remove issues that are provably false (use read_file to verify)\n"
+                "- When in doubt, KEEP the issue - don't filter out real bugs\n"
+                "- Do NOT create new issues\n"
+                "- Do NOT modify issue fields"
             )
         ),
         HumanMessage(
             content=f"""File: {file_path}
 
-Diff:
+Diff (shows only changes):
 ```diff
 {diff_content}
 ```
@@ -582,13 +694,18 @@ Diff:
 Issues to validate:
 {json.dumps(issues_payload, indent=2)}
 
-Validate each issue and return a ValidationResult with:
-- valid_issues: subset of input issues that are confirmed valid
-- removed: list of entries with 'issue' (the removed issue object) and 'reason' (why it was removed)"""
+TASK:
+1. For issues about "undefined/missing" code, use `read_file("{file_path}")` to check if the code actually exists elsewhere
+2. Remove ONLY clear false positives
+3. Keep all logic bugs, security issues, and real functionality problems
+
+Return a ValidationResult with:
+- valid_issues: confirmed real issues
+- removed: false positives with reason for removal"""
         ),
     ]
 
-    validation_settings = ToolCallerSettings(max_tool_calls=0)
+    validation_settings = ToolCallerSettings(max_tool_calls=5)  # Allow tool calls for validation
 
     try:
         if model is None:

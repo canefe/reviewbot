@@ -22,7 +22,7 @@ from reviewbot.core.agent import Agent
 from reviewbot.core.config import Config
 from reviewbot.infra.git.clone import get_repo_name
 from reviewbot.models.gpt import get_gpt_model_low_effort
-from reviewbot.tools import get_diff, think
+from reviewbot.tools import get_diff, ls_dir, read_file, think
 
 console = Console()
 
@@ -54,7 +54,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
         api_key=config.llm_api_key,
         base_url=config.llm_base_url,
         temperature=0.0,
-        reasoning_effort="medium",
+        reasoning_effort="low",
     )
 
     model = build_chat_model(modelCfg)
@@ -97,7 +97,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
     # Create main agent for code review
     main_agent: Agent = create_agent(
         model=model,
-        tools=[get_diff, think],
+        tools=[get_diff, read_file, ls_dir, think],
         store=store,
     )
 
@@ -107,7 +107,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
     )
     low_effort_agent: Agent = create_agent(
         model=low_effort_model,
-        tools=[get_diff, think],
+        tools=[get_diff, read_file, ls_dir, think],
         store=store,
     )
 
@@ -128,7 +128,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
         )
     else:
         console.print(
-            "[yellow]⚠ Failed to create acknowledgment (returned None), stopping... [/yellow]"
+            "[yellow]Failed to create acknowledgment (returned None), stopping... [/yellow]"
         )
         return "Review failed: acknowledgment creation returned None"
 
@@ -154,9 +154,10 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
             agent=main_agent,
             quick_scan_agent=low_effort_agent,
             model=model,
-            tools=[get_diff, think],
+            tools=[get_diff, read_file, ls_dir, think],
             quick_scan_model=low_effort_model,
-            quick_scan_tools=[get_diff, think],
+            quick_scan_tools=[get_diff, read_file, ls_dir, think],
+            acknowledgment_info=(ack.discussion_id, ack.note_id, gitlab_config),
         )
 
         # Convert IssueModel to domain Issue objects
@@ -183,12 +184,12 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
                 diff_refs=diff_refs,
                 agent=low_effort_agent,
                 model=low_effort_model,
-                tools=[get_diff, think],
+                tools=[get_diff, read_file, ls_dir, think],
             )
             console.print("[dim]update_review_summary completed[/dim]")
         else:
             console.print(
-                "[yellow]⚠ No acknowledgment to update (initial acknowledgment may have failed)[/yellow]"
+                "[yellow]No acknowledgment to update (initial acknowledgment may have failed)[/yellow]"
             )
 
         # Discussions are now created as reviews complete, but we still need to

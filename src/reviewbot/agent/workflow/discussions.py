@@ -94,7 +94,7 @@ def handle_file_issues(
             f"{issue.description}\n"
         )
         if issue.suggestion:
-            discussion_body += f"\n{issue.suggestion}\n"
+            discussion_body += f"\n```diff\n{issue.suggestion}\n```\n"
         discussion_body += "\n"
 
     position = build_position()
@@ -123,7 +123,7 @@ def handle_file_issues(
                 f"{issue.description}\n"
             )
             if issue.suggestion:
-                reply_body += f"\n{issue.suggestion}\n"
+                reply_body += f"\n```diff\n{issue.suggestion}\n```\n"
             note_id = reply_to_discussion(
                 discussion_id=discussion_id,
                 body=reply_body,
@@ -156,7 +156,7 @@ def handle_file_issues(
                         f"{issue.description}\n"
                     )
                     if issue.suggestion:
-                        reply_body += f"\n{issue.suggestion}\n"
+                        reply_body += f"\n```diff\n{issue.suggestion}\n```\n"
                     note_id = reply_to_discussion(
                         discussion_id=discussion_id,
                         body=reply_body,
