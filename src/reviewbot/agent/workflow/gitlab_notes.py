@@ -1,6 +1,7 @@
 from typing import Any, NamedTuple
 from urllib.parse import quote
 
+from ido_agents.agents.tool_runner import ToolCallerSettings
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.func import task  # type: ignore
 from rich.console import Console  # type: ignore
@@ -147,7 +148,6 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
     try:
         # Get response with no tool calls allowed
         from ido_agents.agents.ido_agent import create_ido_agent
-        from ido_agents.agents.tool_runner import ToolCallerSettings
 
         summary_settings = ToolCallerSettings(max_tool_calls=0)
         ido_agent = create_ido_agent(model=model, tools=[])
@@ -295,7 +295,13 @@ paragraph2
             raise ValueError("model parameter is required for ido-agents migration")
 
         ido_agent = create_ido_agent(model=model, tools=tools or [])
-        llm_summary = ido_agent.with_structured_output(ReviewSummary).invoke(messages)
+
+        summary_settings = ToolCallerSettings(max_tool_calls=0)
+        llm_summary = (
+            ido_agent.with_structured_output(ReviewSummary)
+            .with_tool_caller(summary_settings)
+            .invoke(messages)
+        )
 
         llm_summary = llm_summary.summary if llm_summary else "Review completed successfully."
 
