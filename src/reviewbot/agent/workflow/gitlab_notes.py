@@ -297,7 +297,7 @@ paragraph2
         ido_agent = create_ido_agent(model=model, tools=tools or [])
         llm_summary = ido_agent.with_structured_output(ReviewSummary).invoke(messages)
 
-        llm_summary = str(llm_summary)
+        llm_summary = llm_summary.summary if llm_summary else "Review completed successfully."
 
     except Exception as e:
         console.print(f"[yellow]Failed to generate LLM summary: {e}[/yellow]")
