@@ -14,6 +14,7 @@ from reviewbot.agent.workflow.state import CodebaseState, store
 from reviewbot.core.issues import IssueModel
 from reviewbot.core.issues.issue_model import IssueModelList
 from reviewbot.tools.diff import get_diff_from_file
+from reviewbot.tools.read_file import read_file_from_store
 
 console = Console()
 
@@ -371,6 +372,7 @@ async def quick_scan_file(
 
     try:
         diff_content = get_diff_from_file(agent.store, file_path)
+        file_content = read_file_from_store(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
@@ -399,11 +401,13 @@ Set needs_review=false if:
         HumanMessage(
             content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
 
-Here is the diff:
 
-```diff
+Here is the file:
+{file_content}
+
+Here is the diff:
 {diff_content}
-```"""
+"""
         ),
     ]
 
@@ -482,32 +486,10 @@ async def review_single_file(
     reasoning_context = get_reasoning_context(agent.store)
 
     # Force a reasoning pass to ensure think() is invoked during deep review
-    try:
-        diff_content = get_diff_from_file(agent.store, file_path)
-        think_messages: list[BaseMessage] = [
-            SystemMessage(
-                content=(
-                    "You are a senior code reviewer. You must think and review. "
-                    "with 2-5 sentences of reasoning about the provided diff. "
-                    "Do not use any other tools. Once finished, reply with the "
-                    "single word DONE."
-                )
-            ),
-            HumanMessage(
-                content=f"""Diff for {file_path}:
-
-```diff
-{diff_content}
-```
-""",
-            ),
-        ]
-        if model:
-            think_settings = ToolCallerSettings(max_tool_calls=40)
-            ido_agent = create_ido_agent(model=model, tools=tools or [])
-            await ido_agent.with_tool_caller(think_settings).ainvoke(think_messages)
-    except Exception as e:
-        console.print(f"[yellow]Failed to record reasoning for {file_path}: {e}[/yellow]")
+    diff_content = get_diff_from_file(agent.store, file_path)
+    file_content = read_file_from_store(agent.store, file_path)
+    if not file_content:
+        file_content = ""
 
     messages: list[BaseMessage] = [
         SystemMessage(
@@ -584,15 +566,11 @@ Be specific and reference exact line numbers from the diff."""
         HumanMessage(
             content=f"""Review the merge request diff for the file: {file_path}
 
-WORKFLOW:
-1. Use `get_diff("{file_path}")` to get the diff
-2. Analyze the changes for bugs, security issues, and logic errors
-3. If you need context beyond the diff (imports, variable declarations, surrounding code):
-   - Use `read_file("{file_path}")` to see the complete file
-4. Use `think()` to document your reasoning and analysis
-5. Return your findings as a list of issues (or empty list if none)
+File content:
+{file_content}
 
-Find the real bugs - that's what matters most!
+Diff:
+{diff_content}
 """
         ),
     ]

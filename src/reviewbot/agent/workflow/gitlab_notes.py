@@ -29,7 +29,7 @@ console = Console()
 
 
 @task
-def post_review_acknowledgment(
+async def post_review_acknowledgment(
     *, gitlab: GitProviderConfig, diffs: list[FileDiff], model: BaseChatModel
 ) -> AcknowledgmentResult | None:
     """
@@ -151,7 +151,7 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
 
         summary_settings = ToolCallerSettings(max_tool_calls=0)
         ido_agent = create_ido_agent(model=model, tools=[])
-        summary = ido_agent.with_tool_caller(summary_settings).invoke(messages)
+        summary = await ido_agent.with_tool_caller(summary_settings).ainvoke(messages)
 
         # Post as a discussion (so we can update it later)
         acknowledgment_body = f"""<img src="https://img.shields.io/badge/Code_Review-Starting-blue?style=flat-square" />
@@ -186,7 +186,8 @@ Write a brief acknowledgment message (2-3 sentences) letting the developer know 
         return None
 
 
-def update_review_summary(
+@task
+async def update_review_summary(
     api_v4: str,
     token: str,
     project_id: str,
@@ -297,10 +298,10 @@ paragraph2
         ido_agent = create_ido_agent(model=model, tools=tools or [])
 
         summary_settings = ToolCallerSettings(max_tool_calls=0)
-        llm_summary = (
+        llm_summary = await (
             ido_agent.with_structured_output(ReviewSummary)
             .with_tool_caller(summary_settings)
-            .invoke(messages)
+            .ainvoke(messages)
         )
 
         llm_summary = llm_summary.summary if llm_summary else "Review completed successfully."
