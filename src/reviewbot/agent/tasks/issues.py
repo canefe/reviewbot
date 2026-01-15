@@ -664,7 +664,7 @@ async def validate_issues_for_file(
                 "- ONLY remove issues that are provably false (use read_file to verify)\n"
                 "- Do NOT infer cross-file breakages; validate only what the diff/file proves\n"
                 "- If a file is deleted and the issue is about missing types/functions elsewhere, remove it\n"
-                "- When in doubt, KEEP the issue - don't filter out real bugs\n"
+                "- Remove any issue claiming compile/runtime breakage unless the diff/file itself shows the failure\n"
                 "- Do NOT create new issues\n"
                 "- Do NOT modify issue fields"
             )
@@ -685,6 +685,7 @@ TASK:
 2. Remove ONLY clear false positives
 3. Keep all logic bugs, security issues, and real functionality problems
 4. Discard any issue that relies on assumptions about other files not shown in this diff/file
+5. Keep an issue only if you can point to concrete evidence in the diff/file (line numbers) that supports it
 
 Return a ValidationResult with:
 - valid_issues: confirmed real issues
