@@ -639,34 +639,19 @@ async def validate_issues_for_file(
     messages: list[BaseMessage] = [
         SystemMessage(
             content=(
-                "You are an issue validator. Your job is to remove FALSE POSITIVES while keeping real bugs.\n\n"
-                "The codebase already has been linted, built, formatted and compiled successfully. "
-                "Make sure to remove 'issues' that claim otherwise.\n\n"
-                "AVAILABLE TOOLS:\n"
-                "- `read_file(file_path)` - Read the complete file to verify issues\n"
-                "- `ls_dir(dir_path)` - List directory contents to verify file structure\n\n"
-                "WHAT TO REMOVE (false positives):\n"
-                "- 'Variable X undefined' - when X is actually defined elsewhere in the file\n"
-                "- 'Import Y missing' - when Y exists at the top of the file\n"
-                "- 'Function Z not declared' - when Z is defined in the complete file\n\n"
-                "- Speculation about other files or the wider codebase that is NOT shown in the diff\n"
-                "- Claims that a deletion breaks other code unless the breakage is proven in this file's diff\n"
-                "- Mentions of symbols/types/functions that do not appear in the diff or file content\n"
-                "- 'Compile error' - the codebase is already compiled successfully.\n"
-                "WHAT TO KEEP (real issues):\n"
-                "- Logic errors - wrong conditions, broken algorithms, incorrect business logic\n"
-                "- Security vulnerabilities - SQL injection, XSS, auth bypass, etc.\n"
-                "- Bugs that will crash or produce wrong results\n"
-                "- Data corruption risks\n"
-                "- Performance problems\n\n"
-                "RULES:\n"
-                "- KEEP issues about logic, bugs, security, and functionality\n"
-                "- ONLY remove issues that are provably false (use read_file to verify)\n"
-                "- Do NOT infer cross-file breakages; validate only what the diff/file proves\n"
-                "- If a file is deleted and the issue is about missing types/functions elsewhere, remove it\n"
-                "- Remove any issue claiming compile/runtime breakage unless the diff/file itself shows the failure\n"
-                "- Do NOT create new issues\n"
-                "- Do NOT modify issue fields"
+                "You are a strict Issue Validator filter. The project is ALREADY COMPILED AND RUNNING.\n\n"
+                "### CRITICAL CONTEXT\n"
+                "1. THE CODEBASE HAS ALREADY COMPILED AND BUILT SUCCESSFULLY.\n"
+                "2. If a file is deleted in a diff, it means the references were already cleaned up.\n"
+                "3. PROVISION: Any issue claiming 'compilation error', 'missing reference', or 'broken startup' is FACTUALLY WRONG.\n\n"
+                "### VALIDATION ARCHITECTURE\n"
+                "Your ONLY goal is to discard issues that assume the code is currently broken. "
+                "Since the build passed, the code is structurally sound. You are only looking for LOGIC bugs in NEW code.\n\n"
+                "### DISCARD IMMEDIATELY (False Positives):\n"
+                "- **Deletions:** Claims that deleting code/files will break the app (The build passed, so it didn't).\n"
+                "- **References:** Claims that a symbol is undefined (It is likely defined in a file you can't see).\n"
+                "- **Build/Runtime:** Any mention of 'compilation errors', 'build failures', or 'initialization failures'.\n"
+                "- **Assumptions:** Speculation about files outside the provided diff.\n\n"
             )
         ),
         HumanMessage(
@@ -681,11 +666,9 @@ Issues to validate:
 {json.dumps(issues_payload, indent=2)}
 
 TASK:
-1. For issues about "undefined/missing" code, use `read_file("{file_path}")` to check if the code actually exists elsewhere
-2. Remove ONLY clear false positives
-3. Keep all logic bugs, security issues, and real functionality problems
-4. Discard any issue that relies on assumptions about other files not shown in this diff/file
-5. Keep an issue only if you can point to concrete evidence in the diff/file (line numbers) that supports it
+1. If the diff shows a file being DELETED, and the issue claims this deletion causes a failure elsewhere: DISCARD THE ISSUE.
+2. The fact that the file was deleted and the project STILL COMPILED means the initialization logic was moved or is no longer necessary.
+3. Validate only the logic within the lines starting with '+' (added).
 
 Return a ValidationResult with:
 - valid_issues: confirmed real issues
