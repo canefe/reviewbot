@@ -235,6 +235,43 @@ async def update_review_summary(
     total_files = len(diffs)
     files_with_issues = len(issues_by_file)
 
+    # Build change overview for context
+    new_files: list[str] = []
+    deleted_files: list[str] = []
+    renamed_files: list[tuple[str, str]] = []
+    modified_files: list[str] = []
+
+    for diff in diffs:
+        if diff.is_renamed:
+            renamed_files.append((diff.old_path or "unknown", diff.new_path or "unknown"))
+        elif diff.is_new_file:
+            new_files.append(diff.new_path or diff.old_path or "unknown")
+        elif diff.is_deleted_file:
+            deleted_files.append(diff.old_path or diff.new_path or "unknown")
+        else:
+            modified_files.append(diff.new_path or diff.old_path or "unknown")
+
+    change_stats = (
+        "Files changed: "
+        f"{total_files} (new: {len(new_files)}, modified: {len(modified_files)}, "
+        f"renamed: {len(renamed_files)}, deleted: {len(deleted_files)})"
+    )
+    change_overview_lines: list[str] = []
+    change_overview_lines.extend(f"- {path} (new)" for path in new_files)
+    change_overview_lines.extend(f"- {path} (deleted)" for path in deleted_files)
+    change_overview_lines.extend(f"- {old} -> {new} (renamed)" for old, new in renamed_files)
+    change_overview_lines.extend(f"- {path} (modified)" for path in modified_files)
+
+    max_change_lines = 12
+    if len(change_overview_lines) > max_change_lines:
+        remaining = len(change_overview_lines) - max_change_lines
+        change_overview_lines = change_overview_lines[:max_change_lines]
+        change_overview_lines.append(f"- ... and {remaining} more file(s)")
+
+    change_overview_text = (
+        "\n".join(change_overview_lines) if change_overview_lines else "- No files listed."
+    )
+
     # Prepare issue details for LLM
     issues_summary: list[str] = []
     for issue in issues:
@@ -257,7 +294,7 @@ IMPORTANT:
 - Provide reasoning about the overall merge request purpose and code quality.
 - Highlight key concerns or positive aspects
 - Be constructive and professional
-- DO NOT use any tools
+- Use tools to generate a comprehensive summary
 - Use paragraphs with readable flow. Use two paragrahs with 3-5 sentences.
 Paragraphs should be wrapped with <p> tags. Use new <p> tag for a newline.
 Example
@@ -268,7 +305,8 @@ paragraph
 <p>
 paragraph2
 </p>
-- Focus on the big picture, not individual issue details"""
+- Focus on the big picture, not individual issue details
+- Reference the changes overview so the summary stays grounded in what changed, even if there are no issues"""
             ),
             HumanMessage(
                 content=f"""A code review has been completed with the following results:
@@ -281,6 +319,10 @@ paragraph2
   - Medium severity: {medium_count}
   - Low severity: {low_count}
 
+**Changes overview:**
+{change_stats}
+{change_overview_text}
+
 **Issues found:**
 {issues_text}
 
@@ -288,7 +330,8 @@ paragraph2
 1. Provides overall assessment of the purpose of the merge request purpose and code quality.
 2. Highlights the most important concerns (if any)
 3. Gives reasoning about the review findings
-4. Is constructive and actionable      """
+4. Is constructive and actionable
+5. Mention the kinds of changes and at least one example file from the changes overview      """
             ),
         ]
 
@@ -297,7 +340,7 @@ paragraph2
 
         ido_agent = create_ido_agent(model=model, tools=tools or [])
 
-        summary_settings = ToolCallerSettings(max_tool_calls=0)
+        summary_settings = ToolCallerSettings(max_tool_calls=5)
         llm_summary = await (
             ido_agent.with_structured_output(ReviewSummary)
             .with_tool_caller(summary_settings)
