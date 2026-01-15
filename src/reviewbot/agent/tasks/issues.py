@@ -640,7 +640,8 @@ async def validate_issues_for_file(
         SystemMessage(
             content=(
                 "You are an issue validator. Your job is to remove FALSE POSITIVES while keeping real bugs.\n\n"
-                "The codebase already has been linted, built, formatted and compiled successfully. Make sure to remove 'issues' that claim otherwise."
+                "The codebase already has been linted, built, formatted and compiled successfully. "
+                "Make sure to remove 'issues' that claim otherwise.\n\n"
                 "AVAILABLE TOOLS:\n"
                 "- `read_file(file_path)` - Read the complete file to verify issues\n"
                 "- `ls_dir(dir_path)` - List directory contents to verify file structure\n\n"
@@ -648,6 +649,9 @@ async def validate_issues_for_file(
                 "- 'Variable X undefined' - when X is actually defined elsewhere in the file\n"
                 "- 'Import Y missing' - when Y exists at the top of the file\n"
                 "- 'Function Z not declared' - when Z is defined in the complete file\n\n"
+                "- Speculation about other files or the wider codebase that is NOT shown in the diff\n"
+                "- Claims that a deletion breaks other code unless the breakage is proven in this file's diff\n"
+                "- Mentions of symbols/types/functions that do not appear in the diff or file content\n"
                 "- 'Compile error' - the codebase is already compiled successfully.\n"
                 "WHAT TO KEEP (real issues):\n"
                 "- Logic errors - wrong conditions, broken algorithms, incorrect business logic\n"
@@ -658,6 +662,8 @@ async def validate_issues_for_file(
                 "RULES:\n"
                 "- KEEP issues about logic, bugs, security, and functionality\n"
                 "- ONLY remove issues that are provably false (use read_file to verify)\n"
+                "- Do NOT infer cross-file breakages; validate only what the diff/file proves\n"
+                "- If a file is deleted and the issue is about missing types/functions elsewhere, remove it\n"
                 "- When in doubt, KEEP the issue - don't filter out real bugs\n"
                 "- Do NOT create new issues\n"
                 "- Do NOT modify issue fields"
@@ -678,6 +684,7 @@ TASK:
 1. For issues about "undefined/missing" code, use `read_file("{file_path}")` to check if the code actually exists elsewhere
 2. Remove ONLY clear false positives
 3. Keep all logic bugs, security issues, and real functionality problems
+4. Discard any issue that relies on assumptions about other files not shown in this diff/file
 
 Return a ValidationResult with:
 - valid_issues: confirmed real issues
