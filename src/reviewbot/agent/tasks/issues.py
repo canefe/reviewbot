@@ -640,6 +640,7 @@ async def validate_issues_for_file(
         SystemMessage(
             content=(
                 "You are an issue validator. Your job is to remove FALSE POSITIVES while keeping real bugs.\n\n"
+                "The codebase already has been linted, built, formatted and compiled successfully. Make sure to remove 'issues' that claim otherwise."
                 "AVAILABLE TOOLS:\n"
                 "- `read_file(file_path)` - Read the complete file to verify issues\n"
                 "- `ls_dir(dir_path)` - List directory contents to verify file structure\n\n"
@@ -647,6 +648,7 @@ async def validate_issues_for_file(
                 "- 'Variable X undefined' - when X is actually defined elsewhere in the file\n"
                 "- 'Import Y missing' - when Y exists at the top of the file\n"
                 "- 'Function Z not declared' - when Z is defined in the complete file\n\n"
+                "- 'Compile error' - the codebase is already compiled successfully.\n"
                 "WHAT TO KEEP (real issues):\n"
                 "- Logic errors - wrong conditions, broken algorithms, incorrect business logic\n"
                 "- Security vulnerabilities - SQL injection, XSS, auth bypass, etc.\n"
@@ -683,7 +685,7 @@ Return a ValidationResult with:
         ),
     ]
 
-    validation_settings = ToolCallerSettings(max_tool_calls=5)  # Allow tool calls for validation
+    validation_settings = ToolCallerSettings(max_tool_calls=10)  # Allow tool calls for validation
 
     try:
         if model is None:
