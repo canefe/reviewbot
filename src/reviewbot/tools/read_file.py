@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool  # type: ignore
+from langgraph.func import BaseStore  # type: ignore
 from rich.console import Console
 
 from reviewbot.agent.workflow.state import CodebaseState
@@ -8,43 +9,19 @@ from reviewbot.agent.workflow.state import CodebaseState
 console = Console()
 
 
-@tool
-def read_file(
+def read_file_from_store(
+    store: BaseStore,
     file_path: str,
-    runtime: ToolRuntime,  # type: ignore
     line_start: int | None = None,
     line_end: int | None = None,
 ) -> str:
-    """Read the contents of a file from the repository.
-
-    Use this tool to get the full context of a file when the diff alone is not sufficient
-    to understand the code. This helps avoid false positives by seeing the complete picture.
-
-    Args:
-        file_path: Relative path to the file in the repository (e.g., "src/main.go")
-        line_start: Optional line number to start reading from (1-indexed)
-        line_end: Optional line number to stop reading at (inclusive)
-
-    Returns:
-        The file contents, optionally limited to the specified line range
-
-    Examples:
-        - read_file("src/main.go") - Read entire file
-        - read_file("src/main.go", line_start=10, line_end=50) - Read lines 10-50
-
-    Note:
-        Returns an error message if the file is newly added (doesn't exist in current checkout)
-    """
-    if runtime.store is None:
-        console.print("[red]read_file: Store not found in runtime[/red]")
-        raise ValueError("Store not found in runtime")
-
+    """Read file contents using the codebase state stored in the runtime store."""
     line_range = f" (lines {line_start}-{line_end})" if line_start or line_end else ""
     console.print(f"[cyan]read_file: '{file_path}'{line_range}[/cyan]")
 
     # Get codebase state from store
     NS = ("codebase",)
-    raw = runtime.store.get(NS, "state")
+    raw = store.get(NS, "state")
     if not raw:
         console.print("[red]read_file: Codebase state not found in store[/red]")
         raise ValueError("Codebase state not found in store")
@@ -174,3 +151,42 @@ def read_file(
         console.print(f"[dim]  → Message: {error_msg}[/dim]")
 
         raise ValueError(error_msg) from e
+
+
+@tool
+def read_file(
+    file_path: str,
+    runtime: ToolRuntime,  # type: ignore
+    line_start: int | None = None,
+    line_end: int | None = None,
+) -> str:
+    """Read the contents of a file from the repository.
+
+    Use this tool to get the full context of a file when the diff alone is not sufficient
+    to understand the code. This helps avoid false positives by seeing the complete picture.
+
+    Args:
+        file_path: Relative path to the file in the repository (e.g., "src/main.go")
+        line_start: Optional line number to start reading from (1-indexed)
+        line_end: Optional line number to stop reading at (inclusive)
+
+    Returns:
+        The file contents, optionally limited to the specified line range
+
+    Examples:
+        - read_file("src/main.go") - Read entire file
+        - read_file("src/main.go", line_start=10, line_end=50) - Read lines 10-50
+
+    Note:
+        Returns an error message if the file is newly added (doesn't exist in current checkout)
+    """
+    if runtime.store is None:
+        console.print("[red]read_file: Store not found in runtime[/red]")
+        raise ValueError("Store not found in runtime")
+
+    return read_file_from_store(
+        runtime.store,
+        file_path,
+        line_start=line_start,
+        line_end=line_end,
+    )

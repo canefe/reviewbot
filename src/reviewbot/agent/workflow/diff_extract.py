@@ -3,46 +3,6 @@ import re
 from typing import Any
 
 
-def _extract_code_from_diff(diff_text: str, line_start: int, line_end: int) -> str:
-    hunk_header_pattern = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
-    lines = diff_text.splitlines()
-
-    extracted = []
-    current_new = 0
-    in_hunk = False
-
-    for line in lines:
-        match = hunk_header_pattern.match(line)
-        if match:
-            current_new = int(match.group(3))
-            in_hunk = True
-            continue
-
-        if not in_hunk:
-            continue
-
-        # We only care about the lines in the NEW file (the result of the change)
-        if line.startswith("+"):
-            if line_start <= current_new <= line_end:
-                extracted.append(line[1:])  # Remove '+'
-            current_new += 1
-        elif line.startswith("-"):
-            # Skip deleted lines for code extraction of the 'new' state
-            continue
-        else:
-            # Context line
-            if line_start <= current_new <= line_end:
-                extracted.append(line[1:] if line else "")
-            current_new += 1
-
-        # FIX: Exit early if we've passed the end of our requested range
-        if current_new > line_end:
-            if extracted:  # Only break if we actually found lines
-                break
-
-    return "\n".join(extracted)
-
-
 def generate_line_code(file_path: str, old_line: int | None, new_line: int | None) -> str:
     """
     Generates a GitLab-compatible line_code.

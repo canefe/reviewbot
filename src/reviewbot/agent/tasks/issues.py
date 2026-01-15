@@ -14,6 +14,7 @@ from reviewbot.agent.workflow.state import CodebaseState, store
 from reviewbot.core.issues import IssueModel
 from reviewbot.core.issues.issue_model import IssueModelList
 from reviewbot.tools.diff import get_diff_from_file
+from reviewbot.tools.read_file import read_file_from_store
 
 console = Console()
 
@@ -371,6 +372,7 @@ async def quick_scan_file(
 
     try:
         diff_content = get_diff_from_file(agent.store, file_path)
+        file_content = read_file_from_store(agent.store, file_path)
     except Exception as e:
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
@@ -399,11 +401,13 @@ Set needs_review=false if:
         HumanMessage(
             content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
 
-Here is the diff:
 
-```diff
+Here is the file:
+{file_content}
+
+Here is the diff:
 {diff_content}
-```"""
+"""
         ),
     ]
 
@@ -482,32 +486,10 @@ async def review_single_file(
     reasoning_context = get_reasoning_context(agent.store)
 
     # Force a reasoning pass to ensure think() is invoked during deep review
-    try:
-        diff_content = get_diff_from_file(agent.store, file_path)
-        think_messages: list[BaseMessage] = [
-            SystemMessage(
-                content=(
-                    "You are a senior code reviewer. You must think and review. "
-                    "with 2-5 sentences of reasoning about the provided diff. "
-                    "Do not use any other tools. Once finished, reply with the "
-                    "single word DONE."
-                )
-            ),
-            HumanMessage(
-                content=f"""Diff for {file_path}:
-
-```diff
-{diff_content}
-```
-""",
-            ),
-        ]
-        if model:
-            think_settings = ToolCallerSettings(max_tool_calls=40)
-            ido_agent = create_ido_agent(model=model, tools=tools or [])
-            await ido_agent.with_tool_caller(think_settings).ainvoke(think_messages)
-    except Exception as e:
-        console.print(f"[yellow]Failed to record reasoning for {file_path}: {e}[/yellow]")
+    diff_content = get_diff_from_file(agent.store, file_path)
+    file_content = read_file_from_store(agent.store, file_path)
+    if not file_content:
+        file_content = ""
 
     messages: list[BaseMessage] = [
         SystemMessage(
@@ -584,15 +566,11 @@ Be specific and reference exact line numbers from the diff."""
         HumanMessage(
             content=f"""Review the merge request diff for the file: {file_path}
 
-WORKFLOW:
-1. Use `get_diff("{file_path}")` to get the diff
-2. Analyze the changes for bugs, security issues, and logic errors
-3. If you need context beyond the diff (imports, variable declarations, surrounding code):
-   - Use `read_file("{file_path}")` to see the complete file
-4. Use `think()` to document your reasoning and analysis
-5. Return your findings as a list of issues (or empty list if none)
+File content:
+{file_content}
 
-Find the real bugs - that's what matters most!
+Diff:
+{diff_content}
 """
         ),
     ]
@@ -661,26 +639,19 @@ async def validate_issues_for_file(
     messages: list[BaseMessage] = [
         SystemMessage(
             content=(
-                "You are an issue validator. Your job is to remove FALSE POSITIVES while keeping real bugs.\n\n"
-                "AVAILABLE TOOLS:\n"
-                "- `read_file(file_path)` - Read the complete file to verify issues\n"
-                "- `ls_dir(dir_path)` - List directory contents to verify file structure\n\n"
-                "WHAT TO REMOVE (false positives):\n"
-                "- 'Variable X undefined' - when X is actually defined elsewhere in the file\n"
-                "- 'Import Y missing' - when Y exists at the top of the file\n"
-                "- 'Function Z not declared' - when Z is defined in the complete file\n\n"
-                "WHAT TO KEEP (real issues):\n"
-                "- Logic errors - wrong conditions, broken algorithms, incorrect business logic\n"
-                "- Security vulnerabilities - SQL injection, XSS, auth bypass, etc.\n"
-                "- Bugs that will crash or produce wrong results\n"
-                "- Data corruption risks\n"
-                "- Performance problems\n\n"
-                "RULES:\n"
-                "- KEEP issues about logic, bugs, security, and functionality\n"
-                "- ONLY remove issues that are provably false (use read_file to verify)\n"
-                "- When in doubt, KEEP the issue - don't filter out real bugs\n"
-                "- Do NOT create new issues\n"
-                "- Do NOT modify issue fields"
+                "You are a strict Issue Validator filter. The project is ALREADY COMPILED AND RUNNING.\n\n"
+                "### CRITICAL CONTEXT\n"
+                "1. THE CODEBASE HAS ALREADY COMPILED AND BUILT SUCCESSFULLY.\n"
+                "2. If a file is deleted in a diff, it means the references were already cleaned up.\n"
+                "3. PROVISION: Any issue claiming 'compilation error', 'missing reference', or 'broken startup' is FACTUALLY WRONG.\n\n"
+                "### VALIDATION ARCHITECTURE\n"
+                "Your ONLY goal is to discard issues that assume the code is currently broken. "
+                "Since the build passed, the code is structurally sound. You are only looking for LOGIC bugs in NEW code.\n\n"
+                "### DISCARD IMMEDIATELY (False Positives):\n"
+                "- **Deletions:** Claims that deleting code/files will break the app (The build passed, so it didn't).\n"
+                "- **References:** Claims that a symbol is undefined (It is likely defined in a file you can't see).\n"
+                "- **Build/Runtime:** Any mention of 'compilation errors', 'build failures', or 'initialization failures'.\n"
+                "- **Assumptions:** Speculation about files outside the provided diff.\n\n"
             )
         ),
         HumanMessage(
@@ -695,9 +666,9 @@ Issues to validate:
 {json.dumps(issues_payload, indent=2)}
 
 TASK:
-1. For issues about "undefined/missing" code, use `read_file("{file_path}")` to check if the code actually exists elsewhere
-2. Remove ONLY clear false positives
-3. Keep all logic bugs, security issues, and real functionality problems
+1. If the diff shows a file being DELETED, and the issue claims this deletion causes a failure elsewhere: DISCARD THE ISSUE.
+2. The fact that the file was deleted and the project STILL COMPILED means the initialization logic was moved or is no longer necessary.
+3. Validate only the logic within the lines starting with '+' (added).
 
 Return a ValidationResult with:
 - valid_issues: confirmed real issues
@@ -705,7 +676,7 @@ Return a ValidationResult with:
         ),
     ]
 
-    validation_settings = ToolCallerSettings(max_tool_calls=5)  # Allow tool calls for validation
+    validation_settings = ToolCallerSettings(max_tool_calls=10)  # Allow tool calls for validation
 
     try:
         if model is None:
