@@ -215,7 +215,7 @@ def fetch_mr_diffs(
 
         changes_data = ChangesResponse.model_validate(raw_json)
 
-        if isinstance(changes_data, dict) and "changes" in changes_data:
+        if changes_data and changes_data.changes:
             # New JSON format with changes array
             file_diffs: list[FileDiff] = []
 
@@ -467,7 +467,7 @@ async def async_fetch_mr_diffs(
 
             changes_data = ChangesResponse.model_validate(raw_json)
 
-            if isinstance(changes_data, dict) and "changes" in changes_data:
+            if changes_data and changes_data.changes:
                 # New JSON format with changes array
                 file_diffs: list[FileDiff] = []
 
