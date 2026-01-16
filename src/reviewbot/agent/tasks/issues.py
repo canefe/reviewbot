@@ -5,14 +5,16 @@ from typing import Any
 
 from ido_agents.agents.ido_agent import create_ido_agent
 from ido_agents.agents.tool_runner import ToolCallerSettings
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage
 from langgraph.func import BaseStore, task  # type: ignore
 from pydantic import BaseModel, Field
 from rich.console import Console
 
 from reviewbot.agent.workflow.state import CodebaseState, store
+from reviewbot.core.config import Config
 from reviewbot.core.issues import IssueModel
 from reviewbot.core.issues.issue_model import IssueModelList
+from reviewbot.prompts.get_prompt import get_prompt
 from reviewbot.tools.diff import get_diff_from_file
 from reviewbot.tools.read_file import read_file_from_store
 
@@ -77,6 +79,7 @@ def get_reasoning_context(store: BaseStore | None) -> str:
 @task
 async def identify_issues(
     *,
+    config: Config,
     settings: ToolCallerSettings,
     on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
     agent: Any,
@@ -108,6 +111,7 @@ async def identify_issues(
         agent,
         diffs,
         settings,
+        config=config,
         on_file_complete=on_file_complete,
         quick_scan_agent=quick_scan_agent,
         model=model,
@@ -234,6 +238,7 @@ async def run_concurrent_reviews(
     agent: Any,
     diffs: list[Any],
     settings: ToolCallerSettings,
+    config: Config,
     max_workers: int = 3,  # Limit concurrency to avoid rate limit issues
     task_timeout: int = 160,  # 5 minutes timeout per file
     on_file_complete: Callable[[str, list[IssueModel]], None] | None = None,
@@ -283,6 +288,7 @@ async def run_concurrent_reviews(
                     file_path=file_path,
                     agent=agent,
                     settings=settings,
+                    config=config,
                     quick_scan_agent=quick_scan_agent,
                     model=model,
                     tools=tools,
@@ -361,6 +367,7 @@ async def quick_scan_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
+    config: Config,
     model: Any | None = None,
     tools: list[Any] | None = None,
 ) -> bool:
@@ -377,39 +384,13 @@ async def quick_scan_file(
         console.print(f"[yellow]Could not fetch diff for {file_path}: {e}[/yellow]")
         return True  # If can't get diff, do deep review to be safe
 
-    messages: list[BaseMessage] = [
-        SystemMessage(
-            content="""You are a code review triage assistant. Your job is to quickly determine if a file change needs deep review.
+    # Load prompt template
+    prompt_template = get_prompt("review/quick_scan", config)
 
-Review the diff and decide if this file needs detailed analysis. Set needs_review=true if ANY of these apply:
-- New code that implements business logic
-- Changes to security-sensitive code (auth, permissions, data validation)
-- Database queries or migrations
-- API endpoint changes
-- Complex algorithms or data structures
-- Error handling changes
-- Configuration changes that affect behavior
-- Use tool 'think' to reason. You must reason at least 10 times before giving an answer
-
-Set needs_review=false if:
-- Only formatting/whitespace changes
-- Simple refactoring (renaming variables/functions)
-- Adding/updating comments or documentation only
-- Import reordering
-- Trivial changes (typo fixes in strings, adding logging)"""
-        ),
-        HumanMessage(
-            content=f"""Quickly scan this file and determine if it needs deep review: {file_path}
-
-
-Here is the file:
-{file_content}
-
-Here is the diff:
-{diff_content}
-"""
-        ),
-    ]
+    # Format messages with placeholders
+    messages: list[BaseMessage] = prompt_template.format_messages(
+        file_path=file_path, file_content=file_content, diff_content=diff_content
+    )
 
     try:
         console.print(f"[dim]Quick scanning: {file_path}[/dim]")
@@ -442,6 +423,7 @@ async def review_single_file_wrapper(
     file_path: str,
     agent: Any,
     settings: ToolCallerSettings,
+    config: Config,
     quick_scan_agent: Any | None = None,
     model: Any | None = None,
     tools: list[Any] | None = None,
@@ -456,14 +438,14 @@ async def review_single_file_wrapper(
         # Quick scan first if agent provided
         if quick_scan_agent:
             needs_deep_review = await quick_scan_file(
-                quick_scan_agent, file_path, settings, quick_scan_model, quick_scan_tools
+                quick_scan_agent, file_path, settings, config, quick_scan_model, quick_scan_tools
             )
             if not needs_deep_review:
                 console.print(f"[dim]Skipping deep review for: {file_path}[/dim]")
                 return []
 
         # Now call the actual review function
-        return await review_single_file(agent, file_path, settings, model, tools)
+        return await review_single_file(agent, file_path, settings, config, model, tools)
     except Exception as e:
         console.print(f"[red]Exception in task for {file_path}: {e}[/red]")
         import traceback
@@ -476,6 +458,7 @@ async def review_single_file(
     agent: Any,
     file_path: str,
     settings: ToolCallerSettings,
+    config: Config,
     model: Any | None = None,
     tools: list[Any] | None = None,
 ) -> list[IssueModel]:
@@ -491,89 +474,16 @@ async def review_single_file(
     if not file_content:
         file_content = ""
 
-    messages: list[BaseMessage] = [
-        SystemMessage(
-            content=f"""You are a senior code reviewer analyzing code changes for bugs, security issues, and logic errors.
+    # Load prompt template
+    prompt_template = get_prompt("review/deep_review", config)
 
-AVAILABLE TOOLS:
-- `think()` - Record your internal reasoning (use this to analyze the code)
-- `get_diff(file_path)` - Get the diff for the file being reviewed
-- `read_file(file_path)` - Read the COMPLETE file to see full context beyond the diff
-- `read_file(file_path, line_start, line_end)` - Read specific line ranges
-- `ls_dir(dir_path)` - List contents of a directory to explore the codebase structure
-
-IMPORTANT: CONTEXT LIMITATIONS
-The diff shows only the changed lines, not the full file. When you need to verify something outside the diff (like imports, variable declarations, or function definitions), use `read_file()` to see the complete context.
-
-Use `read_file()` when:
-- You suspect undefined variables/imports but they might exist elsewhere in the file
-- You need to understand surrounding code to assess impact
-- The change references code not shown in the diff
-
-HANDLING NEW FILES:
-If `read_file()` returns an error stating the file is NEW:
-- This file doesn't exist yet in the repository
-- You can only see what's in the diff
-- Be lenient about imports/definitions (assume they're complete in the actual PR)
-- Focus on logic bugs, security issues, and clear errors in the visible code
-
-REASONING TOOL:
-- Use `think()` to record your analysis process{reasoning_context}
-- Call `think()` before producing your final output
-- Document your reasoning about each potential issue
-
-Your task: Review the file '{file_path}' and identify actionable issues.
-
-WHAT TO REPORT:
-- **Critical bugs** - Code that will crash, throw errors, or produce incorrect results
-- **Security vulnerabilities** - SQL injection, XSS, authentication bypass, etc.
-- **Logic errors** - Incorrect algorithms, wrong conditions, broken business logic
-- **Data corruption risks** - Code that could corrupt data or cause inconsistent state
-- **Performance problems** - Clear bottlenecks like O(n²) where O(n) is possible
-- **Breaking changes** - Changes that break existing APIs or functionality
-
-WHAT NOT TO REPORT:
-- Code style preferences (naming, formatting, organization)
-- Missing documentation or comments
-- Minor refactoring suggestions that don't fix bugs
-- Hypothetical edge cases without evidence they're relevant
-- Issues based on assumptions about the environment (e.g., "X might not be installed")
-- Version numbers or package versions you're unfamiliar with (they may be newer than your training)
-- Import paths or APIs you don't recognize (they may have changed since your training)
-
-IMPORTANT:
-- Do NOT invent issues to justify the review
-- Only report issues with direct evidence in the code shown
-
-SEVERITY GUIDELINES:
-- **HIGH**: Crashes, security vulnerabilities, data corruption, broken functionality
-- **MEDIUM**: Logic errors, performance issues, likely bugs in edge cases
-- **LOW**: Minor issues that could cause problems in rare scenarios
-
-SUGGESTIONS:
-When you identify an issue with a clear fix, provide a `suggestion` field with the corrected code.
-Format as a diff showing the old and new code:
-- Lines starting with `-` show old code to remove
-- Lines starting with `+` show new code to add
-- Preserve exact indentation from the original
-
-OUTPUT:
-Return a JSON array of issues. If no issues are found, return an empty array: []
-Each issue must have: title, description, severity, file_path, start_line, end_line, and optionally suggestion.
-
-Be specific and reference exact line numbers from the diff."""
-        ),
-        HumanMessage(
-            content=f"""Review the merge request diff for the file: {file_path}
-
-File content:
-{file_content}
-
-Diff:
-{diff_content}
-"""
-        ),
-    ]
+    # Format messages with placeholders
+    messages: list[BaseMessage] = prompt_template.format_messages(
+        reasoning_context=reasoning_context,
+        file_path=file_path,
+        file_content=file_content,
+        diff_content=diff_content,
+    )
 
     try:
         console.print(f"[cyan]Starting review of: {file_path}[/cyan]")
@@ -599,7 +509,7 @@ Diff:
         if issues:
             # Validate issues against the diff to reduce hallucinations before creating notes.
             issues = await validate_issues_for_file(
-                agent, file_path, issues, settings, model, tools
+                agent, file_path, issues, settings, config, model, tools
             )
 
         console.print(f"[blue]Found {len(issues)} issues in {file_path}[/blue]")
@@ -618,6 +528,7 @@ async def validate_issues_for_file(
     file_path: str,
     issues: list[IssueModel],
     settings: ToolCallerSettings,
+    config: Config,
     model: Any | None = None,
     tools: list[Any] | None = None,
 ) -> list[IssueModel]:
@@ -636,45 +547,15 @@ async def validate_issues_for_file(
     # Import json module for dumps
     import json
 
-    messages: list[BaseMessage] = [
-        SystemMessage(
-            content=(
-                "You are a strict Issue Validator filter. The project is ALREADY COMPILED AND RUNNING.\n\n"
-                "### CRITICAL CONTEXT\n"
-                "1. THE CODEBASE HAS ALREADY COMPILED AND BUILT SUCCESSFULLY.\n"
-                "2. If a file is deleted in a diff, it means the references were already cleaned up.\n"
-                "3. PROVISION: Any issue claiming 'compilation error', 'missing reference', or 'broken startup' is FACTUALLY WRONG.\n\n"
-                "### VALIDATION ARCHITECTURE\n"
-                "Your ONLY goal is to discard issues that assume the code is currently broken. "
-                "Since the build passed, the code is structurally sound. You are only looking for LOGIC bugs in NEW code.\n\n"
-                "### DISCARD IMMEDIATELY (False Positives):\n"
-                "- **Deletions:** Claims that deleting code/files will break the app (The build passed, so it didn't).\n"
-                "- **References:** Claims that a symbol is undefined (It is likely defined in a file you can't see).\n"
-                "- **Build/Runtime:** Any mention of 'compilation errors', 'build failures', or 'initialization failures'.\n"
-                "- **Assumptions:** Speculation about files outside the provided diff.\n\n"
-            )
-        ),
-        HumanMessage(
-            content=f"""File: {file_path}
+    # Load prompt template
+    prompt_template = get_prompt("review/validate_issues", config)
 
-Diff (shows only changes):
-```diff
-{diff_content}
-```
-
-Issues to validate:
-{json.dumps(issues_payload, indent=2)}
-
-TASK:
-1. If the diff shows a file being DELETED, and the issue claims this deletion causes a failure elsewhere: DISCARD THE ISSUE.
-2. The fact that the file was deleted and the project STILL COMPILED means the initialization logic was moved or is no longer necessary.
-3. Validate only the logic within the lines starting with '+' (added).
-
-Return a ValidationResult with:
-- valid_issues: confirmed real issues
-- removed: false positives with reason for removal"""
-        ),
-    ]
+    # Format messages with placeholders
+    messages: list[BaseMessage] = prompt_template.format_messages(
+        file_path=file_path,
+        diff_content=diff_content,
+        issues_json=json.dumps(issues_payload, indent=2),
+    )
 
     validation_settings = ToolCallerSettings(max_tool_calls=10)  # Allow tool calls for validation
 

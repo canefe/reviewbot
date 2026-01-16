@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import BaseModel, SecretStr
 
 
@@ -9,6 +11,7 @@ class Config(BaseModel):
     gitlab_token: str
     gemini_project_id: str
     create_threads: bool = False
+    custom_prompts_dir: Path | None = None
 
     model_config = {
         "extra": "forbid",

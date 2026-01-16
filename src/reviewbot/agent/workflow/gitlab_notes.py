@@ -3,11 +3,13 @@ from urllib.parse import quote
 
 from ido_agents.agents.tool_runner import ToolCallerSettings
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 from langgraph.func import task  # type: ignore
 from rich.console import Console  # type: ignore
 
 from reviewbot.agent.workflow.config import GitProviderConfig
 from reviewbot.core.agent import Agent
+from reviewbot.core.config import Config
 from reviewbot.core.issues import Issue, IssueSeverity
 from reviewbot.core.reviews.review import Acknowledgment
 from reviewbot.core.reviews.review_model import ReviewSummary
@@ -18,6 +20,7 @@ from reviewbot.infra.gitlab.note import (
     post_merge_request_note,
     update_discussion_note,
 )
+from reviewbot.prompts.get_prompt import get_prompt
 
 
 class AcknowledgmentResult(NamedTuple):
@@ -30,7 +33,7 @@ console = Console()
 
 @task
 async def post_review_acknowledgment(
-    *, gitlab: GitProviderConfig, diffs: list[FileDiff], model: BaseChatModel
+    *, gitlab: GitProviderConfig, diffs: list[FileDiff], model: BaseChatModel, config: Config
 ) -> AcknowledgmentResult | None:
     """
     Posts an initial acknowledgment discussion for the MR review.
@@ -61,8 +64,6 @@ async def post_review_acknowledgment(
     Returns:
         Tuple of (discussion_id, note_id) if created, None if already exists or failed
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
     api_v4 = gitlab.get_api_base_url()
     token = gitlab.token.get_secret_value()
     project_id = gitlab.get_project_identifier()
@@ -124,26 +125,11 @@ async def post_review_acknowledgment(
     if len(file_list) > 10:
         files_summary += f"\n- ... and {len(file_list) - 10} more files"
 
+    # Load prompt template
+    prompt_template = get_prompt("gitlab/acknowledgment", config)
+
     # Generate a simple summary with very limited tool calls
-    messages = [
-        SystemMessage(
-            content="""You are a code review assistant. Generate a brief, friendly acknowledgment that a code review is starting.
-
-IMPORTANT:
-- Keep it SHORT (2-3 sentences max)
-- Be surface-level - this is just an acknowledgment, not the actual review
-- DO NOT analyze code yet
-- DO NOT use any tools
-- Just acknowledge what files are being reviewed"""
-        ),
-        HumanMessage(
-            content=f"""A merge request code review is starting for the following files:
-
-{files_summary}
-
-Write a brief acknowledgment message (2-3 sentences) letting the developer know the review is in progress. Be friendly and professional."""
-        ),
-    ]
+    messages: list[BaseMessage] = prompt_template.format_messages(files_summary=files_summary)
 
     try:
         # Get response with no tool calls allowed
@@ -198,6 +184,7 @@ async def update_review_summary(
     diffs: list[FileDiff],
     diff_refs: dict[str, str],
     agent: Agent,
+    config: Config,
     model: BaseChatModel | None = None,
     tools: list[Any] | None = None,
 ) -> None:
@@ -217,8 +204,6 @@ async def update_review_summary(
         diff_refs: Diff references including project_web_url
         agent: The agent to use for generating summary
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
     # Count issues by severity
     high_count = sum(1 for issue in issues if issue.severity == IssueSeverity.HIGH)
     medium_count = sum(1 for issue in issues if issue.severity == IssueSeverity.MEDIUM)
@@ -285,55 +270,21 @@ async def update_review_summary(
     try:
         from ido_agents.agents.ido_agent import create_ido_agent
 
-        messages = [
-            SystemMessage(
-                content="""You are a Merge Request reviewer. Generate a concise, professional summary of a code review with reasoning.
+        # Load prompt template
+        prompt_template = get_prompt("gitlab/summary", config)
 
-IMPORTANT:
-- Use EXACTLY two paragraphs, each wrapped in <p> tags.
-- Provide reasoning about the overall merge request purpose and code quality.
-- Highlight key concerns or positive aspects
-- Be constructive and professional
-- Use tools to generate a comprehensive summary
-- Use paragraphs with readable flow. Use two paragrahs with 3-5 sentences.
-Paragraphs should be wrapped with <p> tags. Use new <p> tag for a newline.
-Example
-<p>
-paragraph
-</p>
-<br>
-<p>
-paragraph2
-</p>
-- Focus on the big picture, not individual issue details
-- Reference the changes overview so the summary stays grounded in what changed, even if there are no issues"""
-            ),
-            HumanMessage(
-                content=f"""A code review has been completed with the following results:
-
-**Statistics:**
-- Files reviewed: {total_files}
-- Files with issues: {files_with_issues}
-- Total issues: {len(issues)}
-  - High severity: {high_count}
-  - Medium severity: {medium_count}
-  - Low severity: {low_count}
-
-**Changes overview:**
-{change_stats}
-{change_overview_text}
-
-**Issues found:**
-{issues_text}
-
-- Use EXACTLY two paragraphs, each wrapped in <p> tags.
-1. Provides overall assessment of the purpose of the merge request purpose and code quality.
-2. Highlights the most important concerns (if any)
-3. Gives reasoning about the review findings
-4. Is constructive and actionable
-5. Mention the kinds of changes and at least one example file from the changes overview      """
-            ),
-        ]
+        # Format messages with placeholders
+        messages: list[BaseMessage] = prompt_template.format_messages(
+            total_files=total_files,
+            files_with_issues=files_with_issues,
+            total_issues=len(issues),
+            high_count=high_count,
+            medium_count=medium_count,
+            low_count=low_count,
+            change_stats=change_stats,
+            change_overview_text=change_overview_text,
+            issues_text=issues_text,
+        )
 
         if model is None:
             raise ValueError("model parameter is required for ido-agents migration")
