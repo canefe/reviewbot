@@ -69,7 +69,7 @@ def parse_reviewignore(repo_path: Path) -> list[str]:
         List of glob patterns to ignore
     """
     reviewignore_path = repo_path / ".reviewignore"
-    patterns = []
+    patterns: list[str] = []
 
     if not reviewignore_path.exists():
         console.print("[dim].reviewignore file not found, using global blacklist only[/dim]")
@@ -136,7 +136,7 @@ def filter_diffs(diffs: list[FileDiff], reviewignore_patterns: list[str]) -> lis
     Returns:
         Filtered list of diffs
     """
-    filtered = []
+    filtered: list[FileDiff] = []
     ignored_count = 0
 
     for diff in diffs:

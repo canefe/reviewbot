@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 import httpx
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.console import Console
 
 console = Console()
@@ -26,11 +26,14 @@ class LineRange(BaseModel):
     model_config = {"extra": "forbid", "frozen": True}
 
 
-class DiffPosition(BaseModel):
+class DiffRefs(BaseModel):
     base_sha: str
     start_sha: str
     head_sha: str
+    project_web_url: str | None = None
 
+
+class DiffPosition(DiffRefs):
     position_type: Literal["text", "image", "file"]
 
     old_path: str | None = None
@@ -66,6 +69,24 @@ class FileDiff(BaseModel):
         "extra": "forbid",
         "frozen": True,
     }
+
+
+class FileChange(BaseModel):
+    """Represents an individual file change within a diff."""
+
+    old_path: str | None = Field(None, description="The path of the file before the change")
+    new_path: str | None = Field(None, description="The path of the file after the change")
+    diff: str = Field(..., description="The unified diff text")
+    new_file: bool = Field(False, description="Whether this is a brand new file")
+    deleted_file: bool = Field(False, description="Whether this file was deleted")
+    renamed_file: bool = Field(False, description="Whether the file was moved or renamed")
+    too_large: bool = Field(False, description="Whether the diff is too large")
+
+
+class ChangesResponse(BaseModel):
+    """The top-level container for the changes API response."""
+
+    changes: list[FileChange]
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)\s*$")
@@ -176,11 +197,11 @@ def fetch_mr_diffs(
     mr_data = mr_response.json()
 
     # Get diff_refs for position objects
-    diff_refs = mr_data.get("diff_refs") or {}
-    base_sha = diff_refs.get("base_sha")
-    head_sha = diff_refs.get("head_sha")
-    start_sha = diff_refs.get("start_sha")
-    mr_web_url = mr_data.get("web_url")
+    diff_refs = mr_data["diff_refs"]
+    base_sha = diff_refs["base_sha"]
+    head_sha = diff_refs["head_sha"]
+    start_sha = diff_refs["start_sha"]
+    mr_web_url = mr_data["web_url"]
     if mr_web_url and "/-/merge_requests/" in mr_web_url:
         diff_refs["project_web_url"] = mr_web_url.split("/-/merge_requests/")[0]
 
@@ -189,20 +210,22 @@ def fetch_mr_diffs(
     changes_response.raise_for_status()
 
     try:
-        # Try to parse as JSON (new format)
-        changes_data = changes_response.json()
+        # Try to parse as JSON
+        raw_json = changes_response.json()
+
+        changes_data = ChangesResponse.model_validate(raw_json)
 
         if isinstance(changes_data, dict) and "changes" in changes_data:
             # New JSON format with changes array
             file_diffs: list[FileDiff] = []
 
-            for change in changes_data["changes"]:
-                change_old_path: str | None = change.get("old_path")
-                change_new_path: str | None = change.get("new_path")
-                diff_text: str = change.get("diff", "")
-                change_is_new_file: bool = change.get("new_file", False)
-                change_is_deleted_file: bool = change.get("deleted_file", False)
-                change_is_renamed: bool = change.get("renamed_file", False)
+            for change in changes_data.changes:
+                change_old_path: str | None = change.old_path
+                change_new_path: str | None = change.new_path
+                diff_text: str = change.diff
+                change_is_new_file: bool = change.new_file
+                change_is_deleted_file: bool = change.deleted_file
+                change_is_renamed: bool = change.renamed_file
 
                 # Create position object for discussions
                 change_position: dict[str, Any] | None = None
@@ -273,7 +296,7 @@ def fetch_mr_diffs(
                     # if line
 
                 # If diff is empty or too large, try to get it from raw_diffs endpoint
-                if not diff_text or change.get("too_large", False):
+                if not diff_text or change.too_large:
                     # Fallback to raw diff endpoint for this file
                     raw_diff_url = f"{mr_url}/diffs"
                     raw_response = requests.get(raw_diff_url, headers=headers, timeout=timeout)
@@ -339,7 +362,7 @@ def fetch_mr_diffs(
         # Create position object for discussions
         # GitLab requires line_code or line numbers (new_line/old_line)
         # Extract the first line number from the diff for file-level positioning
-        raw_position: dict[str, Any] | None = None
+        raw_position: DiffPosition | None = None
         if base_sha and head_sha and start_sha:
             # Try to extract the first line number from the diff
             extracted_new_line: int | None = None
@@ -355,24 +378,24 @@ def fetch_mr_diffs(
                     break
 
             # Create position object with line information
-            raw_position = {
-                "base_sha": base_sha,
-                "head_sha": head_sha,
-                "start_sha": start_sha,
-                "old_path": parsed_old_path,
-                "new_path": parsed_new_path,
-                "position_type": "text",
-            }
+            raw_position = DiffPosition(
+                base_sha=base_sha,
+                head_sha=head_sha,
+                start_sha=start_sha,
+                old_path=parsed_old_path,
+                new_path=parsed_new_path,
+                position_type="text",
+            )
 
             # Add line numbers if we found them
             if extracted_new_line is not None:
-                raw_position["new_line"] = extracted_new_line
+                raw_position.new_line = extracted_new_line
             if extracted_old_line is not None:
-                raw_position["old_line"] = extracted_old_line
+                raw_position.old_line = extracted_old_line
 
             # If no lines found, use line 1 as default for file-level discussion
             if extracted_new_line is None and extracted_old_line is None:
-                raw_position["new_line"] = 1
+                raw_position.new_line = 1
 
         out.append(
             FileDiff(
@@ -409,7 +432,7 @@ async def async_fetch_mr_diffs(
     mr_iid: str,
     token: str,
     timeout: int = 30,
-) -> tuple[list[FileDiff], dict[str, str]]:
+) -> tuple[list[FileDiff], DiffRefs]:
     """
     Fetch merge request diffs from GitLab API (async version).
 
@@ -429,37 +452,36 @@ async def async_fetch_mr_diffs(
         mr_data = mr_response.json()
 
         # Get diff_refs for position objects
-        diff_refs = mr_data.get("diff_refs") or {}
-        base_sha = diff_refs.get("base_sha")
-        head_sha = diff_refs.get("head_sha")
-        start_sha = diff_refs.get("start_sha")
+        diff_refs: DiffRefs = mr_data["diff_refs"]
         mr_web_url = mr_data.get("web_url")
         if mr_web_url and "/-/merge_requests/" in mr_web_url:
-            diff_refs["project_web_url"] = mr_web_url.split("/-/merge_requests/")[0]
+            diff_refs.project_web_url = mr_web_url.split("/-/merge_requests/")[0]
 
         # Try the new JSON changes endpoint first
         changes_response = await client.get(changes_url, headers=headers, timeout=timeout)
         changes_response.raise_for_status()
 
         try:
-            # Try to parse as JSON (new format)
-            changes_data = changes_response.json()
+            # Try to parse as JSON
+            raw_json = changes_response.json()
+
+            changes_data = ChangesResponse.model_validate(raw_json)
 
             if isinstance(changes_data, dict) and "changes" in changes_data:
                 # New JSON format with changes array
                 file_diffs: list[FileDiff] = []
 
-                for change in changes_data["changes"]:
-                    change_old_path: str | None = change.get("old_path")
-                    change_new_path: str | None = change.get("new_path")
-                    diff_text: str = change.get("diff", "")
-                    change_is_new_file: bool = change.get("new_file", False)
-                    change_is_deleted_file: bool = change.get("deleted_file", False)
-                    change_is_renamed: bool = change.get("renamed_file", False)
+                for change in changes_data.changes:
+                    change_old_path: str | None = change.old_path
+                    change_new_path: str | None = change.new_path
+                    diff_text: str = change.diff
+                    change_is_new_file: bool = change.new_file
+                    change_is_deleted_file: bool = change.deleted_file
+                    change_is_renamed: bool = change.renamed_file
 
                     # Create position object for discussions
-                    change_position: dict[str, Any] | None = None
-                    if base_sha and head_sha and start_sha:
+                    change_position: DiffPosition | None = None
+                    if diff_refs.base_sha and diff_refs.head_sha and diff_refs.start_sha:
                         # Parse diff to find first hunk with line range information
                         hunk_header_pattern = re.compile(
                             r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
@@ -503,27 +525,27 @@ async def async_fetch_mr_diffs(
                                 current_new += 1
 
                         # Create position object
-                        change_position = {
-                            "base_sha": base_sha,
-                            "head_sha": head_sha,
-                            "start_sha": start_sha,
-                            "old_path": change_old_path,
-                            "new_path": change_new_path,
-                            "position_type": "text",
-                        }
+                        change_position = DiffPosition(
+                            base_sha=diff_refs.base_sha,
+                            head_sha=diff_refs.head_sha,
+                            start_sha=diff_refs.start_sha,
+                            old_path=change_old_path,
+                            new_path=change_new_path,
+                            position_type="text",
+                        )
 
                         if change_new_line is not None:
-                            change_position["new_line"] = change_new_line
+                            change_position.new_line = change_new_line
 
                         if change_old_line is not None:
-                            change_position["old_line"] = change_old_line
+                            change_position.old_line = change_old_line
 
                         # Default fallback
                         if change_new_line is None and change_old_line is None:
-                            change_position["new_line"] = 1
+                            change_position.new_line = 1
 
                     # If diff is empty or too large, try to get it from raw_diffs endpoint
-                    if not diff_text or change.get("too_large", False):
+                    if not diff_text or change.too_large:
                         # Fallback to raw diff endpoint for this file
                         raw_diff_url = f"{mr_url}/diffs"
                         raw_response = await client.get(
@@ -589,8 +611,8 @@ async def async_fetch_mr_diffs(
         ) = _parse_paths_from_chunk(lines)
 
         # Create position object for discussions
-        raw_position: dict[str, Any] | None = None
-        if base_sha and head_sha and start_sha:
+        raw_position: DiffPosition | None = None
+        if diff_refs.base_sha and diff_refs.head_sha and diff_refs.start_sha:
             extracted_new_line: int | None = None
             extracted_old_line: int | None = None
 
@@ -604,24 +626,24 @@ async def async_fetch_mr_diffs(
                     break
 
             # Create position object with line information
-            raw_position = {
-                "base_sha": base_sha,
-                "head_sha": head_sha,
-                "start_sha": start_sha,
-                "old_path": parsed_old_path,
-                "new_path": parsed_new_path,
-                "position_type": "text",
-            }
+            raw_position = DiffPosition(
+                base_sha=diff_refs.base_sha,
+                head_sha=diff_refs.head_sha,
+                start_sha=diff_refs.start_sha,
+                old_path=parsed_old_path,
+                new_path=parsed_new_path,
+                position_type="text",
+            )
 
             # Add line numbers if we found them
             if extracted_new_line is not None:
-                raw_position["new_line"] = extracted_new_line
+                raw_position.new_line = extracted_new_line
             if extracted_old_line is not None:
-                raw_position["old_line"] = extracted_old_line
+                raw_position.old_line = extracted_old_line
 
             # If no lines found, use line 1 as default for file-level discussion
             if extracted_new_line is None and extracted_old_line is None:
-                raw_position["new_line"] = 1
+                raw_position.new_line = 1
 
         out.append(
             FileDiff(

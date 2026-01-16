@@ -2,6 +2,8 @@ import hashlib
 import re
 from typing import Any
 
+type LineNo = int | None
+
 
 def generate_line_code(file_path: str, old_line: int | None, new_line: int | None) -> str:
     """
@@ -31,7 +33,7 @@ def create_position_for_issue(
     in_hunk = False
 
     # Track the actual lines found in the diff to build the range
-    matched_lines = []  # List of (old_line, new_line)
+    matched_lines: list[tuple[LineNo, LineNo]] = []  # List of (old_line, new_line)
 
     for line in lines:
         match = hunk_header_pattern.match(line)

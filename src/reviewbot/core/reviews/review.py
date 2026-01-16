@@ -9,7 +9,7 @@ class Review:
     id: UUID = field(default_factory=uuid4)
     repo: str = ""
     commit: str = ""
-    issues: list[Issue] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list[Issue])
     summary: str = ""
 
 
