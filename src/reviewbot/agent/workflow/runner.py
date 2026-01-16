@@ -120,6 +120,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
         gitlab=gitlab_config,
         diffs=filtered_diffs,
         model=low_effort_model,
+        config=config,
     )
 
     if ack is not None:
@@ -149,6 +150,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
 
         # Call identify_issues task directly
         issue_models = await identify_issues(
+            config=config,
             settings=settings,
             on_file_complete=on_file_review_complete,
             agent=main_agent,
@@ -183,6 +185,7 @@ async def work_agent(inputs: dict[Any, Any]) -> str:
                 diffs=filtered_diffs,
                 diff_refs=diff_refs,
                 agent=low_effort_agent,
+                config=config,
                 model=low_effort_model,
                 tools=[get_diff, read_file, ls_dir, think],
             )
