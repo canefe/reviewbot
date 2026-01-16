@@ -13,9 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: pip install ruff
-      - run: ruff format --check .
-      - run: ruff check .
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Format Check (Ruff)
+        run: uv run ruff format --check .
+
+      - name: Lint Check (Ruff)
+        run: uv run ruff check .
+
+      - name: Type Check (Pyright)
+        run: uv run pyright .
 
   build:
     runs-on: ubuntu-latest

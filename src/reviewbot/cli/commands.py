@@ -2,7 +2,7 @@ from pathlib import Path
 
 import typer
 
-from reviewbot.agent.workflow import work_agent
+from reviewbot.agent.workflow import work_agent  # type: ignore
 from reviewbot.cli.app import app
 from reviewbot.infra.config.env import load_env
 from reviewbot.infra.git.repo_tree import tree
@@ -22,10 +22,12 @@ def work(
     mr_iid: str = typer.Argument(..., help="Merge request IID"),
 ):
     config = load_env()
-    work_agent(
-        config,
-        project_id,
-        mr_iid,
+    work_agent.invoke(  # type: ignore
+        {
+            "config": config,
+            "project_id": project_id,
+            "mr_iid": mr_iid,
+        },
     )
 
 

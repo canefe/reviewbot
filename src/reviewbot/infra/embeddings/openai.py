@@ -10,6 +10,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pydantic import BaseModel, Field, SecretStr
 from rich.console import Console
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -53,6 +54,14 @@ EXCLUDE_DIRS = {
 }
 
 
+class SearchResult(BaseModel):
+    similarity: float = Field(..., description="Cosine similarity score (0 to 1)")
+    path: str = Field(..., description="Relative path to the source file")
+    filename: str = Field(..., description="Name of the file")
+    chunk_index: int = Field(..., description="Index of the chunk within the file")
+    text: str = Field(..., description="The actual code snippet")
+
+
 class CodebaseVectorStore:
     def __init__(
         self,
@@ -62,7 +71,7 @@ class CodebaseVectorStore:
         vectors_dir: str | Path = "vectors/codebase",
         embeddings_model: str | None = None,
         embeddings_base_url: str | None = None,
-        embeddings_api_key: str | None = None,
+        embeddings_api_key: SecretStr | None = None,
     ):
         self.repo_root = Path(repo_root).resolve()
         self.vectors_dir = Path(vectors_dir)
@@ -73,7 +82,7 @@ class CodebaseVectorStore:
         if embeddings_base_url is None:
             embeddings_base_url = os.getenv("EMBEDDINGS_BASE_URL")
         if embeddings_api_key is None:
-            embeddings_api_key = os.getenv("EMBEDDINGS_API_KEY", "dummy")
+            embeddings_api_key = SecretStr(os.getenv("EMBEDDINGS_API_KEY", "dummy"))
 
         self.embeddings = OpenAIEmbeddings(
             model=embeddings_model,
@@ -82,7 +91,6 @@ class CodebaseVectorStore:
             tiktoken_enabled=False,
             chunk_size=64,
             max_retries=3,
-            request_timeout=120,
         )
 
         self.splitter = RecursiveCharacterTextSplitter(
@@ -149,21 +157,10 @@ class CodebaseVectorStore:
             raise RuntimeError("No source files found to embed")
 
         self.vector_store = FAISS.from_documents(docs, self.embeddings)
-        self._build_metadata_index()
         self.save()
 
     def compile(self, command: str) -> str:
         return subprocess.run(command, shell=True, capture_output=True, text=True).stdout
-
-    def _build_metadata_index(self) -> None:
-        self.metadata_index = {}
-        if not self.vector_store:
-            return
-
-        for doc_id, doc in self.vector_store.docstore._dict.items():
-            path = doc.metadata.get("path")
-            if path:
-                self.metadata_index.setdefault(path, []).append(doc_id)
 
     def save(self) -> None:
         if not self.vector_store:
@@ -195,26 +192,26 @@ class CodebaseVectorStore:
         *,
         top_k: int = 10,
         path: str | None = None,
-    ) -> list[dict]:
+    ) -> list[SearchResult]:
         if not self.vector_store:
             raise RuntimeError("Vector store not loaded")
 
-        filter = {}
-        if path:
-            filter["path"] = path
-        results = self.vector_store.similarity_search_with_score(query, k=top_k, filter=filter)
-        out = []
+        search_filter = {"path": path} if path else None
+        results = self.vector_store.similarity_search_with_score(  # type: ignore
+            query, k=top_k, filter=search_filter
+        )
+
+        out: list[SearchResult] = []
         for doc, score in results:
             out.append(
-                {
-                    "similarity": float(1 - score),
-                    "path": doc.metadata.get("path"),
-                    "filename": doc.metadata.get("filename"),
-                    "chunk_index": doc.metadata.get("chunk_index"),
-                    "text": doc.page_content,
-                }
+                SearchResult(
+                    similarity=float(1 - score),
+                    path=doc.metadata.get("path", ""),  # type: ignore
+                    filename=doc.metadata.get("filename", ""),  # type: ignore
+                    chunk_index=doc.metadata.get("chunk_index", 0),  # type: ignore
+                    text=doc.page_content,
+                )
             )
-        console.print(out)
         return out
 
     def read_file(
